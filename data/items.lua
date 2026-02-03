@@ -4,7 +4,7 @@ return {
 		weight = 220,
 		degrade = 60,
 		client = {
-			image = 'burger_chicken.png',
+			image = 'burger_chicken.webp',
 			status = { hunger = 200000 },
 			anim = 'eating',
 			prop = 'burger',
@@ -115,7 +115,7 @@ return {
 		modelp = `ng_proc_sodacup_01a`,
 		description = "A cup to put your soda in.",
 		client = {
-			image = 'soda_cup.png',
+			image = 'soda_cup.webp',
 		}
 	},
 	['bun']                  = {
@@ -128,7 +128,7 @@ return {
 			prop = 'v_ret_247_bread1',
 			usetime = 2500,
 
-			image = 'bun.png',
+			image = 'bun.webp',
 		}
 	},
 	['raw_patty']            = {
@@ -137,7 +137,7 @@ return {
 		description = "Listen, it's still mooing. Better put it in a grill fast",
 		degradee = 30,
 		client = {
-			image = 'raw_patty.png',
+			image = 'raw_patty.webp',
 		}
 	},
 	['cooked_patty']         = {
@@ -146,7 +146,7 @@ return {
 		description = "A cooked slab of meat, eat it by itself.",
 		client = {
 			status = { hunger = 7 },
-			image = 'cooked_patty.png',
+			image = 'cooked_patty.webp',
 			anim = 'eating',
 			prop = 'burger',
 			usetime = 2500,
@@ -158,7 +158,7 @@ return {
 		modelp = `ng_proc_sodacup_01a`,
 		description = "Who doesn't like cola from burgershot?",
 		client = {
-			image = 'soda_cup.png',
+			image = 'soda_cup.webp',
 			status = { thirst = 25 },
 			anim = { dict = 'mp_player_intdrink', clip = 'loop_bottle' },
 			prop = { model = `ng_proc_sodacup_01a`, pos = vec3(0.05, 0.05, -0.15), rot = vec3(5.0, 5.0, -180.5) },
@@ -199,7 +199,7 @@ return {
 		close = false,
 		consume = 0,
 		client = {
-			image = 'paper_bag.png'
+			image = 'paper_bag.webp'
 		},
 		modelp = 'prop_food_bs_bag_04'
 	},
@@ -215,7 +215,7 @@ return {
 	['identification']       = {
 		label = 'Identification',
 		client = {
-			image = 'card_id.png'
+			image = 'card_id.webp'
 		}
 	},
 
@@ -365,7 +365,7 @@ return {
 		stack = false,
 		weight = 10,
 		client = {
-			image = 'card_bank.png'
+			image = 'card_bank.webp'
 		}
 	},
 
@@ -380,7 +380,7 @@ return {
 		stack = false,
 		close = true,
 		description = "A portable washer you can place.",
-		client = { image = "washing_machine.png" },
+		client = { image = "washing_machine.webp" },
 		server = { export = 'laundry-test.useWasher' }
 	},
 
@@ -390,7 +390,7 @@ return {
 		stack = false,
 		close = true,
 		description = "Keeps things cool while processing.",
-		client = { image = "fan.png" },
+		client = { image = "fan.webp" },
 		server = { export = 'laundry-test.useFan' }
 
 	},
@@ -401,7 +401,7 @@ return {
 		stack = false,
 		close = true,
 		description = "Carry and sort laundry with style.",
-		client = { image = "basket.png" },
+		client = { image = "basket.webp" },
 		server = { export = 'laundry-test.usePanel' }
 	},
 
@@ -411,7 +411,7 @@ return {
 		stack = false,
 		close = true,
 		description = "Portable power for your setup.",
-		client = { image = "generator.png" },
+		client = { image = "generator.webp" },
 		server = { export = 'laundry-test.useGenerator' }
 	},
 
@@ -422,7 +422,7 @@ return {
 		stack = false,
 		close = false,
 		description = "A small backpack for carrying extra items.",
-		client = { image = "backpack_small.png" }
+		client = { image = "backpack_small.webp" }
 	},
 
 	["backpack_medium"] = {
@@ -431,7 +431,7 @@ return {
 		stack = false,
 		close = false,
 		description = "A medium backpack for carrying more items.",
-		client = { image = "backpack_medium.png" },
+		client = { image = "backpack_medium.webp" },
 		rarity = "common"
 	},
 
@@ -441,7 +441,7 @@ return {
 		stack = false,
 		close = false,
 		description = "A large backpack for carrying many items.",
-		client = { image = "backpack_large.png" },
+		client = { image = "backpack_large.webp" },
 		rarity = "common"
 	},
 
@@ -452,7 +452,7 @@ return {
 		stack = false,
 		modelp = 'prop_fishing_rod_01',
 		client = {
-			image = 'fishing_rod.png'
+			image = 'fishing_rod.webp'
 		}
 	}
 

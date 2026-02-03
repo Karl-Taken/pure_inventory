@@ -2094,8 +2094,9 @@ local function dropItem(source, fromInventory, fromData, data)
 	-- Keep using playerInventory.open & source to indicate the actor who initiated the drop
 	TriggerClientEvent('ox_inventory:createDrop', -1, dropId, Inventory.Drops[dropId], playerInventory and playerInventory.open and source, slot)
 
+	-- sss 
 	if server.loglevel > 0 then
-		lib.logger(playerInventory and playerInventory.owner or fromInventory.owner, 'swapSlots', ('%sx %s transferred from "%s" to "%s"'):format(data.count, toData.name, fromInventory.label, dropId))
+		lib.logger(playerInventory and playerInventory.owner or fromInventory.owner, 'swapSlots', ('%sx %s transferred from "%s (Citizen ID: %s)" to "%s"'):format(data.count, toData.name, fromInventory.label, fromInventory.owner, dropId))
 	end
 
 	if server.syncInventory then
