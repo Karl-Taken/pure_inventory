@@ -1807,10 +1807,10 @@ return {
 			weight = 45,
 		},
 
-		['ammo-9'] = {
-			label = '9mm',
-			weight = 7,
-		},
+		-- ['ammo-9'] = {
+		-- 	label = '9mm',
+		-- 	weight = 7,
+		-- },
 
 		['ammo-firework'] = {
 			label = 'Firework',

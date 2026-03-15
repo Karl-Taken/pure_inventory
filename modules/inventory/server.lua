@@ -3095,17 +3095,19 @@ local function updateWeapon(source, action, value, slot, specialAmmo)
 				inventory.weapon = nil
 				return
 			end
+			
+			-- AMMO_SYSTEM - moved to a new resource
+			-- if action == 'load' and weapon.metadata.durability > 0 then
+			-- 	local ammo = Items(weapon.name).ammoname
+			-- 	local diff = value - (weapon.metadata.ammo or 0)
 
-			if action == 'load' and weapon.metadata.durability > 0 then
-				local ammo = Items(weapon.name).ammoname
-				local diff = value - (weapon.metadata.ammo or 0)
+			-- 	if not Inventory.RemoveItem(inventory, ammo, diff, specialAmmo) then return end
 
-				if not Inventory.RemoveItem(inventory, ammo, diff, specialAmmo) then return end
-
-				weapon.metadata.ammo = value
-				weapon.metadata.specialAmmo = specialAmmo
-				weapon.weight = Inventory.SlotWeight(item, weapon)
-			elseif action == 'throw' then
+			-- 	weapon.metadata.ammo = value
+			-- 	weapon.metadata.specialAmmo = specialAmmo
+			-- 	weapon.weight = Inventory.SlotWeight(item, weapon)
+			-- else
+		if action == 'throw' then
 				if not Inventory.RemoveItem(inventory, weapon.name, 1, weapon.metadata, weapon.slot) then return end
 			elseif action == 'component' then
 				if type == 'number' then
@@ -3121,19 +3123,22 @@ local function updateWeapon(source, action, value, slot, specialAmmo)
 					table.insert(weapon.metadata.components, component.name)
 					weapon.weight = Inventory.SlotWeight(item, weapon)
 				end
-			elseif action == 'ammo' then
-				if item.hash == `WEAPON_FIREEXTINGUISHER` or item.hash == `WEAPON_PETROLCAN` or item.hash == `WEAPON_HAZARDCAN` or item.hash == `WEAPON_FERTILIZERCAN` then
-					weapon.metadata.durability = math.floor(value)
-					weapon.metadata.ammo = weapon.metadata.durability
-				elseif value < weapon.metadata.ammo then
-					local durability = Items(weapon.name).durability * math.abs((weapon.metadata.ammo or 0.1) - value)
-					weapon.metadata.ammo = value
-					weapon.metadata.durability = weapon.metadata.durability - durability
-					weapon.weight = Inventory.SlotWeight(item, weapon)
-				end
 			elseif action == 'melee' and value > 0 then
 				weapon.metadata.durability = weapon.metadata.durability - ((Items(weapon.name).durability or 1) * value)
 			end
+				-- AMMO SYSTEM - Moved to another resource
+			-- 	if action == 'ammo' then 
+			-- 	if item.hash == `WEAPON_FIREEXTINGUISHER` or item.hash == `WEAPON_PETROLCAN` or item.hash == `WEAPON_HAZARDCAN` or item.hash == `WEAPON_FERTILIZERCAN` then
+			-- 		weapon.metadata.durability = math.floor(value)
+			-- 		weapon.metadata.ammo = weapon.metadata.durability
+			-- 	elseif value < weapon.metadata.ammo then
+			-- 		local durability = Items(weapon.name).durability * math.abs((weapon.metadata.ammo or 0.1) - value)
+			-- 		weapon.metadata.ammo = value
+			-- 		weapon.metadata.durability = weapon.metadata.durability - durability
+			-- 		weapon.weight = Inventory.SlotWeight(item, weapon)
+			-- 	end
+			-- else
+
 
             if (weapon.metadata.durability or 0) < 0 then
                 weapon.metadata.durability = 0
