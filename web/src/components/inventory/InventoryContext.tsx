@@ -191,6 +191,14 @@ const InventoryContext: React.FC = () => {
           shouldClose = true;
         }
         break;
+      case 'loadMagazine':
+        {
+          const slot = await ensureItemInPockets();
+          if (!slot) return;
+          await fetchNui('loadMagazineFromItem', { magazineSlot: slot });
+          shouldClose = true;
+        }
+        break;
     }
 
     if (shouldClose) {
@@ -227,6 +235,9 @@ const InventoryContext: React.FC = () => {
         <MenuItem onClick={() => void handleClick({ action: 'give' })} label={Locale.ui_give || 'Give'} />
         <MenuItem onClick={() => void handleClick({ action: 'give_nearby' })} label={Locale.ui_give_nearby || 'Give Nearby'} />
         <MenuItem onClick={() => void handleClick({ action: 'drop' })} label={Locale.ui_drop || 'Drop'} />
+        {item && item.name && Items[item.name]?.magazine && (
+          <MenuItem onClick={() => void handleClick({ action: 'loadMagazine' })} label={Locale.ui_load_magazine || 'Load Magazine'} />
+        )}
         {item && item.count && item.count > 1 && (
           <MenuItem onClick={() => void handleClick({ action: 'split' })} label={Locale.ui_split || 'Split'} />
         )}

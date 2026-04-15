@@ -1,0 +1,92 @@
+return {
+    ['ammo-22'] = {
+        name = 'magazine-22',
+        label = '.22 Magazine',
+        capacity = 12,
+        weight = 90,
+    },
+    ['ammo-38'] = {
+        name = 'magazine-38',
+        label = '.38 Cylinder',
+        capacity = 6,
+        weight = 120,
+    },
+    ['ammo-44'] = {
+        name = 'magazine-44',
+        label = '.44 Cylinder',
+        capacity = 6,
+        weight = 130,
+    },
+    ['ammo-45'] = {
+        name = 'magazine-45',
+        label = '.45 Magazine',
+        capacity = 12,
+        weight = 140,
+    },
+    ['ammo-50'] = {
+        name = 'magazine-50',
+        label = '.50 Magazine',
+        capacity = 7,
+        weight = 160,
+    },
+    ['ammo-9'] = {
+        name = 'magazine-9',
+        label = '9mm Magazine',
+        capacity = 15,
+        weight = 130,
+    },
+    ['ammo-rifle'] = {
+        name = 'magazine-rifle',
+        label = '5.56 Magazine',
+        capacity = 30,
+        weight = 220,
+    },
+    ['ammo-rifle2'] = {
+        name = 'magazine-rifle2',
+        label = '7.62 Magazine',
+        capacity = 30,
+        weight = 240,
+    },
+    ['ammo-shotgun'] = {
+        name = 'magazine-shotgun',
+        label = 'Shotgun Tube',
+        capacity = 8,
+        weight = 180,
+    },
+    ['ammo-sniper'] = {
+        name = 'magazine-sniper',
+        label = 'Sniper Magazine',
+        capacity = 10,
+        weight = 180,
+    },
+    ['ammo-heavysniper'] = {
+        name = 'magazine-heavysniper',
+        label = 'Heavy Sniper Magazine',
+        capacity = 5,
+        weight = 220,
+    },
+    ['ammo-musket'] = {
+        name = 'magazine-musket',
+        label = 'Musket Charge',
+        capacity = 1,
+        weight = 80,
+    },
+    ['ammo-flare'] = {
+        name = 'magazine-flare',
+        label = 'Flare Chamber',
+        capacity = 1,
+        weight = 80,
+    },
+    ['ammo-firework'] = {
+        name = 'magazine-firework',
+        label = 'Firework Tube',
+        capacity = 1,
+        weight = 120,
+    },
+    ['ammo-emp'] = {
+        name = 'magazine-emp',
+        label = 'EMP Chamber',
+        capacity = 1,
+        weight = 120,
+    },
+}

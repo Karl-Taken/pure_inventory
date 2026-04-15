@@ -54,6 +54,10 @@ end
 function client.onLogout()
 	if not PlayerData.loaded then return end
 
+	if client.syncCurrentWeaponAmmoPool then
+		client.syncCurrentWeaponAmmoPool(true)
+	end
+
 	if client.parachute then
 		Utils.DeleteEntity(client.parachute[1])
 		client.parachute = false

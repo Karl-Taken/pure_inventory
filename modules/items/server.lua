@@ -3,6 +3,7 @@ if not lib then return end
 local Items = {}
 local ItemList = require 'modules.items.shared' --[[@as table<string, OxServerItem>]]
 local Utils = require 'modules.utils.server'
+local Magazines = lib.load('data.magazines') or {}
 
 TriggerEvent('ox_inventory:itemList', ItemList)
 
@@ -281,6 +282,15 @@ function Items.Metadata(inv, item, metadata, count)
 		if not metadata.durability then metadata.durability = 100 end
 		if not metadata.ammo and item.ammoname then metadata.ammo = 0 end
 		if not metadata.components then metadata.components = {} end
+		if item.ammoname and not metadata.loadedMagazine then
+			metadata.ammo = 0
+			metadata.specialAmmo = nil
+		end
+		metadata.magContainer = nil
+		if metadata.container and type(metadata.container) == 'string' and metadata.container:find('^weaponmag:') then
+			metadata.container = nil
+			metadata.size = nil
+		end
 
 		if metadata.registered ~= false and (metadata.ammo or item.name == 'WEAPON_STUNGUN') then
 			local registered = type(metadata.registered) == 'string' and metadata.registered or inv?.player?.name
@@ -291,6 +301,16 @@ function Items.Metadata(inv, item, metadata, count)
 		if item.hash == `WEAPON_PETROLCAN` or item.hash == `WEAPON_HAZARDCAN` or item.hash == `WEAPON_FERTILIZERCAN` or item.hash == `WEAPON_FIREEXTINGUISHER` then
 			metadata.ammo = metadata.durability
 		end
+	elseif item.magazine then
+		local magazine = Magazines[item.ammoType]
+
+		if type(metadata) ~= 'table' then metadata = {} end
+
+		metadata.ammoType = metadata.ammoType or item.ammoType
+		metadata.capacity = metadata.capacity or item.capacity or magazine?.capacity or 0
+		metadata.ammo = math.max(0, math.min(metadata.ammo or 0, metadata.capacity))
+		metadata.rounds = metadata.ammo
+		metadata.weight = (Items(metadata.ammoType)?.weight or 0) * metadata.ammo
 	else
 		local container = Items.containers[item.name]
 
@@ -393,6 +413,35 @@ function Items.CheckMetadata(metadata, item, name, ostime)
 		if metadata.serial and item.throwable then
 			metadata.serial = nil
 		end
+
+		if metadata.specialAmmo and type(metadata.specialAmmo) ~= 'string' then
+			metadata.specialAmmo = nil
+		end
+
+		if metadata.loadedMagazine and type(metadata.loadedMagazine) == 'table' then
+			metadata.loadedMagazine.ammoType = metadata.loadedMagazine.ammoType or item.ammoname
+			metadata.loadedMagazine.capacity = metadata.loadedMagazine.capacity or (Magazines[item.ammoname] and Magazines[item.ammoname].capacity) or metadata.ammo or 0
+			metadata.loadedMagazine.ammo = math.max(0, metadata.loadedMagazine.ammo or metadata.ammo or 0)
+			metadata.loadedMagazine.rounds = metadata.loadedMagazine.ammo
+			metadata.ammo = metadata.loadedMagazine.ammo
+			metadata.specialAmmo = metadata.loadedMagazine.specialAmmo
+		elseif item.ammoname then
+			metadata.loadedMagazine = nil
+			metadata.magContainer = nil
+			if metadata.container and type(metadata.container) == 'string' and metadata.container:find('^weaponmag:') then
+				metadata.container = nil
+				metadata.size = nil
+			end
+			metadata.ammo = 0
+			metadata.specialAmmo = nil
+		end
+	elseif item.magazine then
+		local magazine = Magazines[item.ammoType]
+		metadata.ammoType = metadata.ammoType or item.ammoType
+		metadata.capacity = metadata.capacity or item.capacity or magazine?.capacity or 0
+		metadata.ammo = math.max(0, math.min(metadata.ammo or metadata.rounds or 0, metadata.capacity))
+		metadata.rounds = metadata.ammo
+		metadata.weight = (Items(metadata.ammoType)?.weight or 0) * metadata.ammo
 
 		if metadata.specialAmmo and type(metadata.specialAmmo) ~= 'string' then
 			metadata.specialAmmo = nil

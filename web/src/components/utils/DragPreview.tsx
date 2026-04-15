@@ -5,6 +5,7 @@ import { useAppSelector } from '../../store';
 import { getItemUrl, isSlotWithItem } from '../../helpers';
 import { Items } from '../../store/items';
 import { Locale } from '../../store/locale';
+import FallbackItemImage from './FallbackItemImage';
 
 interface DragLayerProps {
   item: DragSource | null;
@@ -381,7 +382,9 @@ const DragPreview: React.FC = () => {
         <div className={previewClasses} style={previewStyle}>
           <div className="rarity-glow" />
           <div className="item-slot-content">
-            <div className="item-slot-img">{imageSrc ? <img src={imageSrc} alt={altLabel} /> : null}</div>
+            <div className="item-slot-img">
+              <FallbackItemImage src={imageSrc} alt={altLabel} />
+            </div>
             {displayAmount !== undefined && (
               <div className="item-slot-amount">
                 <span>{displayAmount.toLocaleString('en-us')}</span>

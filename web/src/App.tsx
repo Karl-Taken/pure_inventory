@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import InventoryComponent from './components/inventory';
 import useNuiEvent from './hooks/useNuiEvent';
 import { Items } from './store/items';
@@ -44,10 +45,9 @@ const applyRarityStyles = (config?: RarityConfig) => {
   Object.entries(config.Levels).forEach(([key, level]) => {
     const rarityClass = `rarity-${key.toLowerCase()}`;
     const selector = `.item-slot.${rarityClass}, .utility-slot.${rarityClass}`;
-    // Set --borderColor for the pseudo-element glow
-    // Set background from config (usually a radial gradient)
-    // Set border-color to transparent to hide the default border
-    css += `${selector} { --borderColor: ${level.color} !important; background: ${level.background} !important; border-color: transparent !important; }\n`;
+    // Keep the configured rarity glow/background, but preserve the normal slot edge
+    // so rarity items still retain the inventory's blue border language.
+    css += `${selector} { --borderColor: ${level.color} !important; background: ${level.background} !important; border-color: var(--slot-has-item-border) !important; }\n`;
     css += `${selector} .item-name { color: ${level.text} !important; }\n`;
 
     if (level.animation) {
@@ -155,6 +155,23 @@ const App: React.FC = () => {
   const dispatch = useAppDispatch();
   useScale();
   const manager = useDragDropManager();
+
+  useEffect(() => {
+    const blockTabFocus = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab') return;
+
+      event.preventDefault();
+
+      const activeElement = document.activeElement as HTMLElement | null;
+      activeElement?.blur();
+    };
+
+    window.addEventListener('keydown', blockTabFocus, true);
+
+    return () => {
+      window.removeEventListener('keydown', blockTabFocus, true);
+    };
+  }, []);
 
   useNuiEvent<{
     locale: { [key: string]: string };

@@ -81,6 +81,25 @@ export const onDrop = async (source: DragSource, target?: DropTarget) => {
       ? sourceSlot.count
       : state.itemAmount;
 
+  const targetName = isSlotWithItem(targetSlot, true) ? targetSlot.name : undefined;
+  const targetData = targetName ? Items[targetName] : undefined;
+
+  if (
+    sourceInventory.type === InventoryType.PLAYER &&
+    targetInventory.type === InventoryType.PLAYER &&
+    sourceData.ammo &&
+    targetData?.magazine &&
+    isSlotWithItem(targetSlot, true)
+  ) {
+    await fetchNui('loadMagazineFromItem', {
+      ammoSlot: sourceSlot.slot,
+      magazineSlot: targetSlot.slot,
+      amount: count,
+    });
+
+    return;
+  }
+
   const data = {
     fromSlot: sourceSlot,
     toSlot: targetSlot,

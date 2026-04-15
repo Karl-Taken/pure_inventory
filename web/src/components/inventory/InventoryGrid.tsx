@@ -15,15 +15,24 @@ const PAGE_SIZE = 30;
 
 type InventoryGridProps = React.PropsWithChildren<{
   inventory: Inventory;
-  uiTypeOverride?: InventoryType;
+  uiTypeOverride?: InventoryType | string;
   style?: React.CSSProperties;
+  content?: React.ReactNode;
+  headerExtras?: React.ReactNode;
 }>;
 
-const InventoryGrid: React.FC<InventoryGridProps> = ({ inventory, uiTypeOverride, style, children }) => {
-  const weight = useMemo(
-    () => (inventory.maxWeight !== undefined ? getTotalWeight(inventory.items) : 0),
-    [inventory.maxWeight, inventory.items]
-  );
+const InventoryGrid: React.FC<InventoryGridProps> = ({
+  inventory,
+  uiTypeOverride,
+  style,
+  children,
+  content,
+  headerExtras,
+}) => {
+  const weight = useMemo(() => {
+    if (typeof inventory.weight === 'number') return inventory.weight;
+    return inventory.maxWeight !== undefined ? getTotalWeight(inventory.items) : 0;
+  }, [inventory.weight, inventory.maxWeight, inventory.items]);
   const t = (key: string, fallback: string) => {
     const value = Locale[key];
     return value && value !== key ? value : fallback;
@@ -86,6 +95,10 @@ const InventoryGrid: React.FC<InventoryGridProps> = ({ inventory, uiTypeOverride
       sectionClasses.push('other-backpack-section', 'lean-right');
     } else {
       sectionClasses.push('other-inventory-section', 'lean-right');
+
+      if (uiType === 'weaponmag') {
+        sectionClasses.push('weaponmag-section');
+      }
     }
   }
 
@@ -116,6 +129,7 @@ const InventoryGrid: React.FC<InventoryGridProps> = ({ inventory, uiTypeOverride
                   : t('inventory', 'Inventory'))}
             </span>
           </div>
+          {headerExtras}
           {uiType === InventoryType.PLAYER && (
             <button className="close-button" onClick={() => fetchNui('exit')}>
               <span className="material-symbols-rounded">expand_more</span>
@@ -137,18 +151,20 @@ const InventoryGrid: React.FC<InventoryGridProps> = ({ inventory, uiTypeOverride
         )}
       </div>
       <div className={gridWrapperClassName}>
-        <div className="item-grid" ref={containerRef}>
-          {inventory.items.slice(0, (page + 1) * PAGE_SIZE).map((item, index) => (
-            <InventorySlot
-              key={`${uiType}-${inventory.id}-${item.slot}`}
-              item={item}
-              ref={index === (page + 1) * PAGE_SIZE - 1 ? ref : null}
-              inventoryType={uiType as Inventory['type']}
-              inventoryGroups={inventory.groups}
-              inventoryId={inventory.id}
-            />
-          ))}
-        </div>
+        {content || (
+          <div className="item-grid" ref={containerRef}>
+            {inventory.items.slice(0, (page + 1) * PAGE_SIZE).map((item, index) => (
+              <InventorySlot
+                key={`${uiType}-${inventory.id}-${item.slot}`}
+                item={item}
+                ref={index === (page + 1) * PAGE_SIZE - 1 ? ref : null}
+                inventoryType={uiType as Inventory['type']}
+                inventoryGroups={inventory.groups}
+                inventoryId={inventory.id}
+              />
+            ))}
+          </div>
+        )}
       </div>
       {children}
     </ContainerTag>

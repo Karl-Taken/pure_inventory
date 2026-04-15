@@ -72,13 +72,20 @@ function Weapon.Equip(item, data, noWeaponAnim)
 		end
 	end
 
-	local ammo = item.metadata.ammo or item.throwable and 1 or 0
+	local ammo = item.throwable and 1 or 0
+
+	if item.ammo then
+		ammo = (item.metadata.ammo or 0) + (item.metadata.reserve or 0)
+	end
 
 	SetCurrentPedWeapon(playerPed, data.hash, true)
 	SetPedCurrentWeaponVisible(playerPed, true, false, false, false)
 	SetWeaponsNoAutoswap(true)
+	SetWeaponsNoAutoreload(true)
 	SetPedAmmo(playerPed, data.hash, ammo)
-	SetTimeout(0, function() RefillAmmoInstantly(playerPed) end)
+	if item.ammo then
+		SetAmmoInClip(playerPed, data.hash, item.metadata.ammo or 0)
+	end
 
 	if item.group == `GROUP_PETROLCAN` or item.group == `GROUP_FIREEXTINGUISHER` then
 		item.metadata.ammo = item.metadata.durability
@@ -95,7 +102,11 @@ function Weapon.Equip(item, data, noWeaponAnim)
 end
 
 function Weapon.Disarm(currentWeapon, noAnim)
-	if currentWeapon?.timer then
+	if currentWeapon?.timer ~= nil then
+		if currentWeapon.ammo and client.syncCurrentWeaponAmmoPool then
+			client.syncCurrentWeaponAmmoPool(true)
+		end
+
 		currentWeapon.timer = nil
 
         TriggerServerEvent('ox_inventory:updateWeapon')
@@ -133,6 +144,7 @@ function Weapon.Disarm(currentWeapon, noAnim)
 	end
 
 	Utils.WeaponWheel()
+	SetWeaponsNoAutoreload(false)
 
 	if client.parachute then
 		local chute = `GADGET_PARACHUTE`

@@ -17,6 +17,7 @@ shared = {
     framework = GetConvar('inventory:framework', 'esx'),
     playerslots = GetConvarInt('inventory:slots', 50),
     playerweight = GetConvarInt('inventory:weight', 30000),
+    ammodebug = GetConvarInt('inventory:ammodebug', 0) == 1,
     target = GetConvarInt('inventory:target', 0) == 1,
     police = json.decode(GetConvar('inventory:police', '["police", "sheriff"]')),
     networkdumpsters = GetConvarInt('inventory:networkdumpsters', 0) == 1
@@ -42,6 +43,7 @@ end
 if IsDuplicityVersion() then
     server = {
         bulkstashsave = GetConvarInt('inventory:bulkstashsave', 1) == 1,
+        ammodebug = GetConvarInt('inventory:ammodebug', 0) == 1,
         loglevel = GetConvarInt('inventory:loglevel', 1),
         randomprices = GetConvarInt('inventory:randomprices', 0) == 0,
         randomloot = GetConvarInt('inventory:randomloot', 1) == 1,
@@ -74,7 +76,7 @@ if IsDuplicityVersion() then
 else
     PlayerData = {}
     client = {
-        autoreload = GetConvarInt('inventory:autoreload', 0) == 1,
+        autoreload = GetConvarInt('inventory:autoreload', 1) == 1,
         screenblur = GetConvarInt('inventory:screenblur', 1) == 1,
         keys = json.decode(GetConvar('inventory:keys', '')) or { 'F2', 'K', 'TAB' },
         enablekeys = json.decode(GetConvar('inventory:enablekeys', '[249]')),
@@ -107,6 +109,8 @@ else
 
     client.ignoreweapons = ignoreweapons
 end
+
+shared.debug = GetConvarInt('inventory:debug', 0) == 1
 
 function shared.print(...) print(string.strjoin(' ', ...)) end
 

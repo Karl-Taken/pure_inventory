@@ -33,6 +33,281 @@ local db = require 'modules.mysql.server'
 local Items = require 'modules.items.server'
 local Inventory = require 'modules.inventory.server'
 
+local AmmoPoolTemplate = {
+	pistol = { clip = 0, reserve = 0, maxReserve = 250 },
+	rifle = { clip = 0, reserve = 0, maxReserve = 350 },
+	shotgun = { clip = 0, reserve = 0, maxReserve = 125 },
+	smg = { clip = 0, reserve = 0, maxReserve = 350 },
+	sniper = { clip = 0, reserve = 0, maxReserve = 150 },
+}
+
+local PlayerAmmoPools = {}
+local DirtyPlayerAmmoPools = {}
+local PURE_ADMIN_RESOURCE_NAME = 'pure_admin'
+
+local function getPlayerIdentifierSummary(playerSource)
+	if type(playerSource) ~= 'number' or playerSource <= 0 then
+		return {}
+	end
+
+	return {
+		discord = GetPlayerIdentifierByType(playerSource, 'discord'),
+		fivem = GetPlayerIdentifierByType(playerSource, 'fivem'),
+		license = GetPlayerIdentifierByType(playerSource, 'license2') or GetPlayerIdentifierByType(playerSource, 'license'),
+	}
+end
+
+function PureAdminBuildCommandActor(playerSource)
+	if type(playerSource) ~= 'number' or playerSource <= 0 then
+		return {
+			source = 0,
+			label = 'console',
+			owner = 'console',
+			name = 'console',
+			identifiers = {},
+		}
+	end
+
+	local actorInventory = Inventory(playerSource)
+
+	return {
+		source = playerSource,
+		label = actorInventory and actorInventory.label or GetPlayerName(playerSource) or tostring(playerSource),
+		owner = actorInventory and actorInventory.owner or tostring(playerSource),
+		name = GetPlayerName(playerSource) or tostring(playerSource),
+		identifiers = getPlayerIdentifierSummary(playerSource),
+	}
+end
+
+local function attachTargetIdentifiers(targetData, targetSource)
+	if type(targetSource) == 'number' and targetSource > 0 then
+		targetData.identifiers = getPlayerIdentifierSummary(targetSource)
+	end
+
+	return targetData
+end
+
+function PureAdminBuildRawCommand(commandName, args)
+	local parts = { '/' .. tostring(commandName) }
+
+	for i = 1, #(args or {}) do
+		parts[#parts + 1] = tostring(args[i])
+	end
+
+	return table.concat(parts, ' ')
+end
+
+local function getSecondaryInventoryType(source, invType, right)
+	if right and right.player and right.id ~= source then
+		return 'otherplayer'
+	end
+
+	return (right and right.type) or invType or 'unknown'
+end
+
+local function buildSecondaryInventoryTarget(source, right, fallbackType)
+	if not right then
+		return nil
+	end
+
+	local targetType = getSecondaryInventoryType(source, fallbackType, right)
+	local targetData = {
+		id = right.id,
+		type = targetType,
+		label = right.label,
+		owner = right.owner,
+	}
+
+	if right.netid then
+		targetData.netId = right.netid
+	end
+
+	if right.player and right.id ~= source then
+		targetData.name = GetPlayerName(right.id) or tostring(right.id)
+		return attachTargetIdentifiers(targetData, right.id)
+	end
+
+	return targetData
+end
+
+function PureAdminLogger(playerSource, eventName, message, data)
+	local resourceState = GetResourceState(PURE_ADMIN_RESOURCE_NAME)
+
+	if resourceState ~= 'started' then
+		return
+	end
+
+	local ok, errorMessage = pcall(function()
+		exports[PURE_ADMIN_RESOURCE_NAME]:logger(playerSource, eventName, message, data)
+	end)
+
+	if not ok and server and server.loglevel and server.loglevel > 1 then
+		lib.print.warn(('[ox_inventory] pure_admin logger failed: %s'):format(tostring(errorMessage)))
+	end
+end
+
+local function ammoDebug(message, ...)
+	if not server.ammodebug then return end
+
+	local parts = table.pack(...)
+	for i = 1, parts.n do
+		parts[i] = tostring(parts[i])
+	end
+
+	shared.info('[ammo-debug]', message, table.unpack(parts, 1, parts.n))
+end
+
+local function copyAmmoPoolState(state, defaults)
+	local defaultState = defaults or state or {}
+	local maxReserve = math.max(0, tonumber(state?.maxReserve) or tonumber(defaultState?.maxReserve) or 0)
+
+	return {
+		clip = math.max(0, tonumber(state?.clip) or 0),
+		reserve = math.min(math.max(0, tonumber(state?.reserve) or 0), maxReserve),
+		maxReserve = maxReserve,
+	}
+end
+
+local function sanitiseAmmoPools(data)
+	local pools = {}
+
+	if type(data) == 'string' and data ~= '' then
+		data = json.decode(data)
+	end
+
+	if type(data) ~= 'table' then
+		data = {}
+	end
+
+	for key, defaultState in pairs(AmmoPoolTemplate) do
+		pools[key] = copyAmmoPoolState(data[key] or defaultState, defaultState)
+	end
+
+	return pools
+end
+
+local function getWeaponAmmoPoolKey(item)
+	if not item?.weapon then return end
+
+	local ammoName = item.ammoname
+
+	if item.name == 'WEAPON_TECPISTOL' or item.name == 'WEAPON_MACHINEPISTOL' or item.name == 'WEAPON_MINISMG'
+		or item.name == 'WEAPON_MICROSMG' or item.name == 'WEAPON_SMG' or item.name == 'WEAPON_SMG_MK2'
+		or item.name == 'WEAPON_COMBATPDW' or item.name == 'WEAPON_ASSAULTSMG'
+	then
+		return 'smg'
+	elseif ammoName == 'ammo-9' or ammoName == 'ammo-22' or ammoName == 'ammo-38' or ammoName == 'ammo-44' or ammoName == 'ammo-45' or ammoName == 'ammo-50' then
+		return 'pistol'
+	elseif ammoName == 'ammo-rifle' or ammoName == 'ammo-rifle2' or ammoName == 'rifle_ammo' then
+		return 'rifle'
+	elseif ammoName == 'ammo-shotgun' or ammoName == 'ammo-musket' or ammoName == 'shotgun_ammo' then
+		return 'shotgun'
+	elseif ammoName == 'smg_ammo' then
+		return 'smg'
+	elseif ammoName == 'ammo-sniper' or ammoName == 'ammo-heavysniper' then
+		return 'sniper'
+	elseif ammoName == 'ammo-emp' or ammoName == 'ammo-flare' or ammoName == 'ammo-firework' or ammoName == 'pistol_ammo' then
+		return 'pistol'
+	end
+end
+
+local function loadPlayerAmmoPools(identifier)
+	local pools = PlayerAmmoPools[identifier]
+
+	if pools then
+		ammoDebug('cache hit for citizenid', identifier, json.encode(pools))
+		return pools
+	end
+
+	local rawAmmo = db.loadPlayerAmmo(identifier)
+	ammoDebug('loadPlayerAmmo raw result for citizenid', identifier, rawAmmo)
+	pools = sanitiseAmmoPools(rawAmmo)
+	PlayerAmmoPools[identifier] = pools
+	DirtyPlayerAmmoPools[identifier] = nil
+	ammoDebug('sanitised ammo pools for citizenid', identifier, json.encode(pools))
+
+	return pools
+end
+
+local function markPlayerAmmoPoolsDirty(identifier)
+	if not identifier then return end
+	DirtyPlayerAmmoPools[identifier] = true
+end
+
+local function savePlayerAmmoPools(identifier, force)
+	local pools = PlayerAmmoPools[identifier]
+
+	if not identifier or not pools then return end
+	if not force and not DirtyPlayerAmmoPools[identifier] then return end
+
+	local payload = json.encode(sanitiseAmmoPools(pools))
+	ammoDebug('saving ammo pools for citizenid', identifier, payload)
+	local result = db.savePlayerAmmo(identifier, payload)
+	ammoDebug('savePlayerAmmo result for citizenid', identifier, result)
+	DirtyPlayerAmmoPools[identifier] = nil
+end
+
+local function saveDirtyPlayerAmmoPools()
+	for identifier in pairs(DirtyPlayerAmmoPools) do
+		savePlayerAmmoPools(identifier, true)
+	end
+end
+
+function server.loadPlayerAmmoPools(identifier)
+	return loadPlayerAmmoPools(identifier)
+end
+
+function server.savePlayerAmmoPools(playerIdOrIdentifier)
+	local identifier = playerIdOrIdentifier
+
+	if type(playerIdOrIdentifier) == 'number' then
+		local inventory = Inventory(playerIdOrIdentifier)
+		identifier = inventory?.owner
+		ammoDebug('resolved player source to citizenid for save', playerIdOrIdentifier, identifier)
+	end
+
+	savePlayerAmmoPools(identifier, true)
+end
+
+function server.saveDirtyPlayerAmmoPools()
+	saveDirtyPlayerAmmoPools()
+end
+
+function server.clearPlayerAmmoPools(playerIdOrIdentifier)
+	local identifier = playerIdOrIdentifier
+
+	if type(playerIdOrIdentifier) == 'number' then
+		local inventory = Inventory(playerIdOrIdentifier)
+		identifier = inventory?.owner
+	end
+
+	if identifier then
+		PlayerAmmoPools[identifier] = nil
+		DirtyPlayerAmmoPools[identifier] = nil
+	end
+end
+
+local function serialiseWeaponMagazineInventory(inv)
+	if not inv then return nil end
+
+	local items = table.create(inv.slots, 0)
+
+	for slot = 1, inv.slots do
+		local item = inv.items[slot]
+		items[slot] = item and table.clone(item) or { slot = slot }
+	end
+
+	return {
+		id = tostring(inv.id),
+		type = 'weaponmag',
+		label = inv.label or 'Magazine',
+		slots = inv.slots,
+		weight = inv.weight,
+		maxWeight = inv.maxWeight,
+		items = items,
+	}
+end
+
 ---@param player table
 ---@param data table?
 --- player requires source, identifier, and name
@@ -43,6 +318,8 @@ function server.setPlayerInventory(player, data)
 	if not data then
 		data = db.loadPlayer(player.identifier)
 	end
+
+	local ammoPools = loadPlayerAmmoPools(player.identifier)
 
 	local inventory = {}
 	local totalWeight = 0
@@ -63,6 +340,17 @@ function server.setPlayerInventory(player, data)
 
 				if item then
 					v.metadata = Items.CheckMetadata(v.metadata or {}, item, v.name, ostime)
+					local ammoPoolKey = getWeaponAmmoPoolKey(item)
+
+					if ammoPoolKey then
+						local ammoState = ammoPools[ammoPoolKey] or AmmoPoolTemplate[ammoPoolKey]
+						v.metadata.ammo = ammoState.clip
+						v.metadata.loadedMagazine = nil
+						v.metadata.specialAmmo = nil
+						v.metadata.reserve = ammoState.reserve
+						v.metadata.maxReserve = ammoState.maxReserve
+					end
+
 					local weight = Inventory.SlotWeight(item, v)
 					totalWeight = totalWeight + weight
 
@@ -77,6 +365,8 @@ function server.setPlayerInventory(player, data)
 
 	if inv then
 		inv.player = server.setPlayerData(player)
+		inv.player.ammoPools = sanitiseAmmoPools(ammoPools)
+		inv.ammoPools = inv.player.ammoPools
 		inv.player.ped = GetPlayerPed(player.source)
 
 		if server.syncInventory then server.syncInventory(inv) end
@@ -240,12 +530,36 @@ local function openInventory(source, invType, data, ignoreSecurityChecks)
 			data = left.items[data]
 
 			if data then
-				right = Inventory(data.metadata.container)
+				local containerId = data.metadata?.container
+				local containerSize = data.metadata?.size
 
-				if not right then
-					right = Inventory.Create(data.metadata.container, data.label, invType, data.metadata.size[1], 0, data.metadata.size[2], false)
+				if not containerId and Items(data.name)?.weapon and data.metadata?.magContainer then
+					containerId = data.metadata.magContainer
+					containerSize = containerSize or { 1, 5000 }
+					data.metadata.container = containerId
+					data.metadata.size = containerSize
+				end
+
+				right = containerId and Inventory(containerId) or nil
+
+				if not right and containerId and containerSize then
+					right = Inventory.Create(containerId, data.label, invType, containerSize[1], 0, containerSize[2], false)
 				end
 			else left.containerSlot = nil end
+		elseif invType == 'weaponmag' then
+			left.weaponMagSlot = data --[[@as number]]
+			data = left.items[data]
+
+			if data and Items(data.name)?.weapon and data.metadata?.magContainer then
+				Inventory.SyncWeaponMagazineInventory(data)
+				right = Inventory(data.metadata.magContainer)
+
+				if not right then
+					right = Inventory.Create(data.metadata.magContainer, ('%s Magazine'):format(data.label or data.name), invType, 1, 0, 5000, false, {})
+				end
+			else
+				left.weaponMagSlot = nil
+			end
 		else right = Inventory(data) end
 
 		if not right then return end
@@ -259,6 +573,7 @@ local function openInventory(source, invType, data, ignoreSecurityChecks)
 		}
 
 		if invType == 'container' then hookPayload.slot = left.containerSlot end
+		if invType == 'weaponmag' then hookPayload.slot = left.weaponMagSlot end
 		if isDataTable and data.netid then hookPayload.netId = data.netid end
 
 		if not TriggerEventHooks('openInventory', hookPayload) then return end
@@ -278,6 +593,29 @@ local function openInventory(source, invType, data, ignoreSecurityChecks)
 		end
 
 		left:openInventory(right)
+
+		local secondaryType = getSecondaryInventoryType(source, invType, right)
+		local isSecondaryInventory = secondaryType ~= 'player'
+
+		if isSecondaryInventory then
+			local inventoryLabel = right.label or tostring(right.id)
+			local logMessage = ('"%s" opened %s inventory "%s"'):format(left.label or GetPlayerName(source) or tostring(source), secondaryType, inventoryLabel)
+
+			PureAdminLogger(source, 'ox_inventory_open_secondary_inventory', logMessage, {
+				action = 'open_secondary_inventory',
+				inventoryType = secondaryType,
+				requestedType = invType,
+				ignoreSecurityChecks = ignoreSecurityChecks == true,
+				target = buildSecondaryInventoryTarget(source, right, invType),
+				context = {
+					leftInventoryId = left.id,
+					leftInventoryType = left.type,
+					containerSlot = invType == 'container' and left.containerSlot or nil,
+					weaponMagSlot = invType == 'weaponmag' and left.weaponMagSlot or nil,
+					coords = closestCoords or right.coords,
+				},
+			})
+		end
 	else
 		left:openInventory(left)
 	end
@@ -372,6 +710,114 @@ lib.callback.register('ox_inventory:getItemCount', function(source, item, metada
 	return (inventory and Inventory.GetItemCount(inventory, item, metadata, true))
 end)
 
+lib.callback.register('ox_inventory:addAmmoToPool', function(source, ammoSlot, weaponSlot)
+	local inventory = Inventory(source)
+
+	if not inventory then return false end
+
+	local ammoItem = inventory.items[ammoSlot]
+	local weapon = inventory.items[weaponSlot or inventory.weapon]
+
+	if not ammoItem or not weapon then return false end
+
+	local weaponItem = Items(weapon.name)
+	local ammoData = Items(ammoItem.name)
+	local ammoPoolKey = getWeaponAmmoPoolKey(weaponItem)
+
+	if not ammoData?.ammo or not weaponItem?.weapon or not ammoPoolKey or weaponItem.ammoname ~= ammoItem.name then
+		return false
+	end
+
+	local amount = math.max(0, tonumber(ammoItem.count) or 0)
+
+	if amount < 1 or not Inventory.RemoveItem(inventory, ammoItem.name, amount, ammoItem.metadata, ammoItem.slot) then
+		return false
+	end
+
+	local ammoPools = inventory.ammoPools or loadPlayerAmmoPools(inventory.owner)
+	local ammoState = ammoPools[ammoPoolKey] or copyAmmoPoolState(AmmoPoolTemplate[ammoPoolKey])
+	ammoState.reserve = math.min(ammoState.maxReserve, math.max(0, ammoState.reserve + amount))
+	ammoPools[ammoPoolKey] = ammoState
+	inventory.ammoPools = ammoPools
+	PlayerAmmoPools[inventory.owner] = ammoPools
+	markPlayerAmmoPoolsDirty(inventory.owner)
+
+	weapon.metadata.reserve = ammoState.reserve
+	weapon.metadata.loadedMagazine = nil
+	weapon.metadata.specialAmmo = nil
+	inventory.changed = true
+	inventory:syncSlotsWithPlayer({
+		{ item = weapon }
+	}, inventory.weight)
+
+	return ammoState
+end)
+
+RegisterNetEvent('ox_inventory:updateAmmoPool', function(poolKey, clip, reserve, slot)
+	local inventory = Inventory(source)
+
+	if not inventory or not AmmoPoolTemplate[poolKey] then return end
+
+	local ammoPools = inventory.ammoPools or loadPlayerAmmoPools(inventory.owner)
+	local ammoState = ammoPools[poolKey] or copyAmmoPoolState(AmmoPoolTemplate[poolKey])
+	ammoState.clip = math.max(0, tonumber(clip) or 0)
+	ammoState.reserve = math.min(ammoState.maxReserve, math.max(0, tonumber(reserve) or 0))
+	ammoPools[poolKey] = ammoState
+	inventory.ammoPools = ammoPools
+	PlayerAmmoPools[inventory.owner] = ammoPools
+	markPlayerAmmoPoolsDirty(inventory.owner)
+
+	local weapon = inventory.items[slot or inventory.weapon]
+
+	if weapon?.metadata then
+		weapon.metadata.ammo = ammoState.clip
+		weapon.metadata.reserve = ammoState.reserve
+		weapon.metadata.loadedMagazine = nil
+		weapon.metadata.specialAmmo = nil
+		inventory.changed = true
+	end
+end)
+
+local function addAmmoReserveToInventory(inventory, poolKey, amount)
+	if not inventory or not AmmoPoolTemplate[poolKey] then return false end
+
+	amount = math.max(0, math.floor(tonumber(amount) or 0))
+	ammoDebug('addAmmoReserve sanitised amount', amount)
+
+	if amount < 1 then return false end
+
+	local ammoPools = inventory.ammoPools or loadPlayerAmmoPools(inventory.owner)
+	local ammoState = ammoPools[poolKey] or copyAmmoPoolState(AmmoPoolTemplate[poolKey])
+	ammoDebug('addAmmoReserve state before update', json.encode(ammoState))
+	ammoState.reserve = math.min(ammoState.maxReserve, math.max(0, ammoState.reserve + amount))
+	ammoPools[poolKey] = ammoState
+	inventory.ammoPools = ammoPools
+	PlayerAmmoPools[inventory.owner] = ammoPools
+	markPlayerAmmoPoolsDirty(inventory.owner)
+	ammoDebug('addAmmoReserve updated state for citizenid', inventory.owner, 'pool', poolKey, json.encode(ammoState))
+
+	local weapon = inventory.items[inventory.weapon]
+
+	if weapon?.metadata and getWeaponAmmoPoolKey(Items(weapon.name)) == poolKey then
+		weapon.metadata.reserve = ammoState.reserve
+		weapon.metadata.loadedMagazine = nil
+		weapon.metadata.specialAmmo = nil
+		inventory.changed = true
+		inventory:syncSlotsWithPlayer({
+			{ item = weapon }
+		}, inventory.weight)
+	end
+
+	return ammoState
+end
+
+lib.callback.register('ox_inventory:addAmmoReserve', function(source, poolKey, amount)
+	local inventory = Inventory(source)
+	ammoDebug('addAmmoReserve called', 'source', source, 'pool', poolKey, 'amount', amount, 'inventory', inventory and inventory.id or 'nil')
+
+	return addAmmoReserveToInventory(inventory, poolKey, amount)
+end)
+
 lib.callback.register('ox_inventory:getInventory', function(source, id)
 	local inventory = Inventory(id or source)
 	return inventory and {
@@ -384,6 +830,10 @@ lib.callback.register('ox_inventory:getInventory', function(source, id)
 		owned = inventory.owner and true or false,
 		items = inventory.items
 	}
+end)
+
+lib.callback.register('ox_inventory:getWeaponMagazineInventory', function(source, weaponSlot)
+	return false
 end)
 
 RegisterNetEvent('ox_inventory:usedItemInternal', function(slot, inv)
@@ -437,6 +887,10 @@ lib.callback.register('ox_inventory:useItem', function(source, itemName, slot, m
 		local item = Items(itemName)
 		local data = item and (slot and inventory.items[slot] or Inventory.GetSlotWithItem(inventory, item.name, metadata, true))
 
+		if item?.ammoPool and item?.ammoAmount then
+			ammoDebug('useItem called for ammo reserve item', 'source', source, 'item', itemName, 'slot', slot, 'inv', inv or 'player')
+		end
+
 		if not data then return end
 
 		slot = data.slot
@@ -472,6 +926,10 @@ lib.callback.register('ox_inventory:useItem', function(source, itemName, slot, m
 
 		if item and data and data.count > 0 and data.name == item.name then
 			data = {name=data.name, label=label, count=data.count, slot=slot, metadata=data.metadata, weight=data.weight}
+
+			if item.ammoPool and item.ammoAmount then
+				ammoDebug('useItem resolved ammo reserve item', 'source', source, 'item', item.name, 'slot', slot, 'count', data.count, 'pool', item.ammoPool, 'amount', item.ammoAmount)
+			end
 
 			if item.ammo then
 				if inventory.weapon then
@@ -517,6 +975,10 @@ lib.callback.register('ox_inventory:useItem', function(source, itemName, slot, m
 
             ---@type boolean
 			local success = lib.callback.await('ox_inventory:usingItem', source, data, noAnim)
+
+			if item.ammoPool and item.ammoAmount then
+				ammoDebug('ox_inventory:usingItem returned for ammo reserve item', 'source', source, 'item', item.name, 'success', success and 'true' or 'false')
+			end
 
 			if item.weapon then
 				inventory.weapon = success and slot or nil
@@ -575,6 +1037,19 @@ lib.callback.register('ox_inventory:useItem', function(source, itemName, slot, m
 				end
 			end
 
+			if item.ammoPool and item.ammoAmount then
+				local ammoState = addAmmoReserveToInventory(inventory, item.ammoPool, item.ammoAmount)
+				ammoDebug('server-side ammo reserve application after useItem', 'source', source, 'item', item.name, 'pool', item.ammoPool, 'amount', item.ammoAmount, 'state', ammoState and json.encode(ammoState) or 'nil')
+
+				if ammoState then
+					TriggerClientEvent('ox_inventory:updateAmmoReservePool', source, item.ammoPool, ammoState, item.ammoAmount)
+				end
+			end
+
+			if item.ammoPool and item.ammoAmount then
+				ammoDebug('useItem completed for ammo reserve item', 'source', source, 'item', item.name, 'remainingCount', inventory.items[data.slot] and inventory.items[data.slot].count or 0)
+			end
+
 			return true
 		end
 	end
@@ -613,8 +1088,10 @@ lib.addCommand({'additem', 'giveitem'}, {
 		{ name = 'count', type = 'number', help = 'The amount of the item to give', optional = true },
 		{ name = 'type', help = 'Sets the "type" metadata to the value', optional = true },
 	},
-	restricted = 'group.admin',
+	restricted = "group.admin",
 }, function(source, args)
+	local executor = PureAdminBuildCommandActor(source)
+	local rawCommand = PureAdminBuildRawCommand('additem', args)
 	local item = Items(args.item)
 
 	if item then
@@ -626,10 +1103,28 @@ lib.addCommand({'additem', 'giveitem'}, {
 			return Citizen.Trace(('Failed to give %sx %s to player %s (%s)'):format(count, item.name, args.target, response))
 		end
 
-		source = Inventory(source) or { label = 'console', owner = 'console' }
-
 		if server.loglevel > 0 then
-			lib.logger(source.owner, 'admin', ('"%s" gave %sx %s to "%s"'):format(source.label, count, item.name, inventory.label))
+			local logMessage = ('"%s" gave %sx %s to "%s"'):format(executor.label, count, item.name, inventory.label)
+			lib.logger(executor.owner, 'admin', logMessage)
+			PureAdminLogger(executor.source, 'ox_inventory_admin_giveitem', logMessage, {
+				action = 'additem_command',
+				actor = {
+					label = executor.label,
+					owner = executor.owner,
+					source = executor.source,
+					name = executor.name,
+					identifiers = executor.identifiers,
+				},
+				target = attachTargetIdentifiers({
+					label = inventory.label,
+					owner = inventory.owner,
+					id = inventory.id,
+				}, args.target),
+				item = item.name,
+				count = count,
+				metadata = args.type and { type = tonumber(args.type) or args.type } or nil,
+				rawCommand = rawCommand,
+			})
 		end
 	end
 end)
@@ -642,8 +1137,10 @@ lib.addCommand('removeitem', {
 		{ name = 'count', type = 'number', help = 'The amount of the item to take' },
 		{ name = 'type', help = 'Only remove items with a matching metadata "type"', optional = true },
 	},
-	restricted = 'group.admin',
+	restricted = "group.admin",
 }, function(source, args)
+	local executor = PureAdminBuildCommandActor(source)
+	local rawCommand = PureAdminBuildRawCommand('removeitem', args)
 	local item = Items(args.item)
 
 	if item and args.count > 0 then
@@ -654,10 +1151,28 @@ lib.addCommand('removeitem', {
 			return Citizen.Trace(('Failed to remove %sx %s from player %s (%s)'):format(args.count, item.name, args.target, response))
 		end
 
-		source = Inventory(source) or {label = 'console', owner = 'console'}
-
 		if server.loglevel > 0 then
-			lib.logger(source.owner, 'admin', ('"%s" removed %sx %s from "%s"'):format(source.label, args.count, item.name, inventory.label))
+			local logMessage = ('"%s" removed %sx %s from "%s"'):format(executor.label, args.count, item.name, inventory.label)
+			lib.logger(executor.owner, 'admin', logMessage)
+			PureAdminLogger(executor.source, 'ox_inventory_admin_removeitem', logMessage, {
+				action = 'removeitem_command',
+				actor = {
+					label = executor.label,
+					owner = executor.owner,
+					source = executor.source,
+					name = executor.name,
+					identifiers = executor.identifiers,
+				},
+				target = attachTargetIdentifiers({
+					label = inventory.label,
+					owner = inventory.owner,
+					id = inventory.id,
+				}, args.target),
+				item = item.name,
+				count = args.count,
+				metadata = args.type and { type = tonumber(args.type) or args.type } or nil,
+				rawCommand = rawCommand,
+			})
 		end
 	end
 end)
@@ -670,8 +1185,10 @@ lib.addCommand('setitem', {
 		{ name = 'count', type = 'number', help = 'The amount of items to set', optional = true },
 		{ name = 'type', help = 'Add or remove items with the metadata "type"', optional = true },
 	},
-	restricted = 'group.admin',
+	restricted = "group.admin",
 }, function(source, args)
+	local executor = PureAdminBuildCommandActor(source)
+	local rawCommand = PureAdminBuildRawCommand('setitem', args)
 	local item = Items(args.item)
 
 	if item then
@@ -682,10 +1199,28 @@ lib.addCommand('setitem', {
 			return Citizen.Trace(('Failed to set %s count to %sx for player %s (%s)'):format(item.name, args.count, args.target, response))
 		end
 
-		source = Inventory(source) or {label = 'console', owner = 'console'}
-
 		if server.loglevel > 0 then
-			lib.logger(source.owner, 'admin', ('"%s" set "%s" %s count to %sx'):format(source.label, inventory.label, item.name, args.count))
+			local logMessage = ('"%s" set "%s" %s count to %sx'):format(executor.label, inventory.label, item.name, args.count)
+			lib.logger(executor.owner, 'admin', logMessage)
+			PureAdminLogger(executor.source, 'ox_inventory_admin_setitem', logMessage, {
+				action = 'setitem_command',
+				actor = {
+					label = executor.label,
+					owner = executor.owner,
+					source = executor.source,
+					name = executor.name,
+					identifiers = executor.identifiers,
+				},
+				target = attachTargetIdentifiers({
+					label = inventory.label,
+					owner = inventory.owner,
+					id = inventory.id,
+				}, args.target),
+				item = item.name,
+				count = args.count,
+				metadata = args.type and { type = tonumber(args.type) or args.type } or nil,
+				rawCommand = rawCommand,
+			})
 		end
 	end
 end)
@@ -712,8 +1247,34 @@ lib.addCommand('takeinv', {
 	params = {
 		{ name = 'target', type = 'playerId', help = 'The player to confiscate items from' },
 	},
-	restricted = 'group.admin',
+	restricted = "group.admin",
 }, function(source, args)
+	local executor = PureAdminBuildCommandActor(source)
+	local rawCommand = PureAdminBuildRawCommand('takeinv', args)
+	local targetInventory = Inventory(args.target)
+
+	if server.loglevel > 0 then
+		local logMessage = ('"%s" confiscated inventory from "%s"'):format(executor.label, targetInventory and targetInventory.label or tostring(args.target))
+		PureAdminLogger(executor.source, 'ox_inventory_admin_takeinv', logMessage, {
+			action = 'takeinv_command',
+			actor = {
+				label = executor.label,
+				owner = executor.owner,
+				source = executor.source,
+				name = executor.name,
+				identifiers = executor.identifiers,
+			},
+			target = attachTargetIdentifiers(targetInventory and {
+				label = targetInventory.label,
+				owner = targetInventory.owner,
+				id = targetInventory.id,
+			} or {
+				id = args.target,
+			}, args.target),
+			rawCommand = rawCommand,
+		})
+	end
+
 	Inventory.Confiscate(args.target)
 end)
 
@@ -722,19 +1283,74 @@ lib.addCommand({'restoreinv', 'returninv'}, {
 	params = {
 		{ name = 'target', type = 'playerId', help = 'The player to restore items to' },
 	},
-	restricted = 'group.admin',
+	restricted = "group.admin",
 }, function(source, args)
+	local executor = PureAdminBuildCommandActor(source)
+	local rawCommand = PureAdminBuildRawCommand('restoreinv', args)
+	local targetInventory = Inventory(args.target)
+
+	if server.loglevel > 0 then
+		local logMessage = ('"%s" restored inventory for "%s"'):format(executor.label, targetInventory and targetInventory.label or tostring(args.target))
+		PureAdminLogger(executor.source, 'ox_inventory_admin_restoreinv', logMessage, {
+			action = 'restoreinv_command',
+			actor = {
+				label = executor.label,
+				owner = executor.owner,
+				source = executor.source,
+				name = executor.name,
+				identifiers = executor.identifiers,
+			},
+			target = attachTargetIdentifiers(targetInventory and {
+				label = targetInventory.label,
+				owner = targetInventory.owner,
+				id = targetInventory.id,
+			} or {
+				id = args.target,
+			}, args.target),
+			aliases = { 'returninv' },
+			rawCommand = rawCommand,
+		})
+	end
+
 	Inventory.Return(args.target)
 end)
 
-lib.addCommand('clearinv', {
+lib.addCommand({'clearinv', 'wipeinv', 'ci'}, {
 	help = 'Wipes all items from the target inventory',
 	params = {
 		{ name = 'invId', help = 'The inventory to wipe items from' },
 	},
-	restricted = 'group.admin',
+	restricted = "group.admin",
 }, function(source, args)
-	Inventory.Clear(tonumber(args.invId) or args.invId == 'me' and source or args.invId)
+	local executor = PureAdminBuildCommandActor(source)
+	local rawCommand = PureAdminBuildRawCommand('clearinv', args)
+	local targetId = tonumber(args.invId) or args.invId == 'me' and source or args.invId
+	local targetInventory = Inventory(targetId)
+
+	if server.loglevel > 0 then
+		local logMessage = ('"%s" cleared inventory "%s"'):format(executor.label, targetInventory and targetInventory.label or tostring(targetId))
+		PureAdminLogger(executor.source, 'ox_inventory_admin_clearinv', logMessage, {
+			action = 'clearinv_command',
+			actor = {
+				label = executor.label,
+				owner = executor.owner,
+				source = executor.source,
+				name = executor.name,
+				identifiers = executor.identifiers,
+			},
+			target = attachTargetIdentifiers(targetInventory and {
+				label = targetInventory.label,
+				owner = targetInventory.owner,
+				id = targetInventory.id,
+				type = targetInventory.type,
+			} or {
+				id = targetId,
+			}, type(targetId) == 'number' and targetId or nil),
+			rawCommand = rawCommand,
+		})
+	end
+
+	Inventory.Clear(targetId)
 end)
 
 lib.addCommand('saveinv', {
@@ -742,8 +1358,27 @@ lib.addCommand('saveinv', {
 	params = {
 		{ name = 'lock', help = 'Lock inventory access, until restart or saved without a lock', optional = true },
 	},
-	restricted = 'group.admin',
+	restricted = "group.support",
 }, function(source, args)
+	local executor = PureAdminBuildCommandActor(source)
+	local rawCommand = PureAdminBuildRawCommand('saveinv', args)
+
+	if server.loglevel > 0 then
+		local logMessage = ('"%s" triggered inventory save'):format(executor.label)
+		PureAdminLogger(executor.source, 'ox_inventory_admin_saveinv', logMessage, {
+			action = 'saveinv_command',
+			actor = {
+				label = executor.label,
+				owner = executor.owner,
+				source = executor.source,
+				name = executor.name,
+				identifiers = executor.identifiers,
+			},
+			lock = args.lock == 'true',
+			rawCommand = rawCommand,
+		})
+	end
+
 	Inventory.SaveInventories(args.lock == 'true', false)
 end)
 
@@ -752,7 +1387,35 @@ lib.addCommand('viewinv', {
 	params = {
 		{ name = 'invId', help = 'The inventory to inspect' },
 	},
-	restricted = 'group.admin',
+	restricted = "group.support",
 }, function(source, args)
-	Inventory.InspectInventory(source, tonumber(args.invId) or args.invId)
+	local executor = PureAdminBuildCommandActor(source)
+	local rawCommand = PureAdminBuildRawCommand('viewinv', args)
+	local targetId = tonumber(args.invId) or args.invId
+	local targetInventory = Inventory(targetId)
+
+	if server.loglevel > 0 then
+		local logMessage = ('"%s" viewed inventory "%s"'):format(executor.label, targetInventory and targetInventory.label or tostring(targetId))
+		PureAdminLogger(executor.source, 'ox_inventory_admin_viewinv', logMessage, {
+			action = 'viewinv_command',
+			actor = {
+				label = executor.label,
+				owner = executor.owner,
+				source = executor.source,
+				name = executor.name,
+				identifiers = executor.identifiers,
+			},
+			target = attachTargetIdentifiers(targetInventory and {
+				label = targetInventory.label,
+				owner = targetInventory.owner,
+				id = targetInventory.id,
+				type = targetInventory.type,
+			} or {
+				id = targetId,
+			}, type(targetId) == 'number' and targetId or nil),
+			rawCommand = rawCommand,
+		})
+	end
+
+	Inventory.InspectInventory(source, targetId)
 end)

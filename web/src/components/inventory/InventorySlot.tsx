@@ -14,6 +14,7 @@ import { ItemsPayload } from '../../reducers/refreshSlots';
 import { closeTooltip, openTooltip } from '../../store/tooltip';
 import { openContextMenu } from '../../store/contextMenu';
 import { useMergeRefs } from '@floating-ui/react';
+import FallbackItemImage from '../utils/FallbackItemImage';
 
 const transparentDragImage =
   typeof window !== 'undefined'
@@ -194,7 +195,7 @@ const InventorySlot: React.ForwardRefRenderFunction<HTMLDivElement, SlotProps> =
     if (item.currency && item.currency !== 'money' && item.currency !== 'black_money' && item.price > 0) {
       return (
         <div className="item-slot-price icon">
-          <img src={item.currency ? getItemUrl(item.currency) : 'none'} alt="item currency" />
+          <FallbackItemImage src={item.currency ? getItemUrl(item.currency) : 'none'} alt="item currency" />
           <span>{item.price.toLocaleString('en-us')}</span>
         </div>
       );
@@ -218,7 +219,14 @@ const InventorySlot: React.ForwardRefRenderFunction<HTMLDivElement, SlotProps> =
     return null;
   };
 
-  const hotkey = inventoryType === InventoryType.PLAYER && item.slot <= 5 ? String(item.slot) : undefined;
+  const magazineCapacity =
+    hasItem && (item.metadata?.capacity !== undefined || Items[item.name]?.capacity !== undefined)
+      ? Number(item.metadata?.capacity ?? Items[item.name]?.capacity ?? 0)
+      : null;
+  const magazineRounds =
+    hasItem && magazineCapacity !== null ? Number(item.metadata?.ammo ?? item.metadata?.rounds ?? 0) : null;
+  const magazineCapacityText =
+    magazineCapacity !== null && magazineRounds !== null ? `${magazineRounds}/${magazineCapacity}` : null;
 
   return (
     <div
@@ -230,7 +238,6 @@ const InventorySlot: React.ForwardRefRenderFunction<HTMLDivElement, SlotProps> =
       data-slot-index={item.slot}
       data-inventory-type={inventoryType}
       data-inventory-id={inventoryId !== undefined && inventoryId !== null ? String(inventoryId) : ''}
-      data-hotkey={hotkey}
       style={{
         opacity: isDragging ? 0.4 : 1.0,
       }}
@@ -257,15 +264,18 @@ const InventorySlot: React.ForwardRefRenderFunction<HTMLDivElement, SlotProps> =
               {(item.metadata?.rarity || Items[item.name]?.rarity).toUpperCase()}
             </div>
           ) : null}
-          <div className="item-slot-amount">{item.count ? <span>{item.count.toLocaleString('en-us')}x</span> : null}</div>
+          <div className="item-slot-amount">
+            {item.count ? <span>{item.count.toLocaleString('en-us')}x</span> : null}
+            {magazineCapacityText ? <span className="item-slot-capacity">{magazineCapacityText}</span> : null}
+          </div>
           <div className="item-slot-img">
-            <img src={getItemUrl(item)} alt={itemLabel} />
+            <FallbackItemImage src={getItemUrl(item)} alt={itemLabel} />
           </div>
           {priceMarkup()}
           <div className="item-slot-footer">
             <span className="item-name">{itemLabel}</span>
-            <span className="item-weight">{itemWeightText}</span>
           </div>
+          <span className="item-weight">{itemWeightText}</span>
           {durabilityValue !== null && inventoryType !== InventoryType.SHOP && (
             <div className="item-slot-durability">
               <div className={`item-slot-durability-fill ${durabilityClass}`} style={{ width: `${durabilityValue}%` }} />

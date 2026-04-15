@@ -9,9 +9,11 @@ local Query = {
     SELECT_GLOVEBOX = 'SELECT plate, glovebox FROM `{vehicle_table}` WHERE `{vehicle_column}` = ?',
     SELECT_TRUNK = 'SELECT plate, trunk FROM `{vehicle_table}` WHERE `{vehicle_column}` = ?',
     SELECT_PLAYER = 'SELECT inventory FROM `{user_table}` WHERE `{user_column}` = ?',
+    SELECT_PLAYER_AMMO = 'SELECT ammo FROM `{user_table}` WHERE `{user_column}` = ?',
     UPDATE_TRUNK = 'UPDATE `{vehicle_table}` SET trunk = ? WHERE `{vehicle_column}` = ?',
     UPDATE_GLOVEBOX = 'UPDATE `{vehicle_table}` SET glovebox = ? WHERE `{vehicle_column}` = ?',
     UPDATE_PLAYER = 'UPDATE `{user_table}` SET inventory = ? WHERE `{user_column}` = ?',
+    UPDATE_PLAYER_AMMO = 'UPDATE `{user_table}` SET ammo = ? WHERE `{user_column}` = ?',
 }
 
 Citizen.CreateThreadNow(function()
@@ -118,6 +120,12 @@ Citizen.CreateThreadNow(function()
         MySQL.query(('ALTER TABLE `%s` ADD COLUMN `inventory` LONGTEXT NULL'):format(playerTable))
     end
 
+    success, result = pcall(MySQL.scalar.await, ('SELECT ammo FROM `%s`'):format(playerTable))
+
+    if not success then
+        MySQL.query(('ALTER TABLE `%s` ADD COLUMN `ammo` LONGTEXT NULL'):format(playerTable))
+    end
+
     local clearStashes = GetConvar('inventory:clearstashes', '6 MONTH')
 
     if clearStashes ~= '' then
@@ -127,6 +135,17 @@ end)
 
 db = {}
 
+local function ammoDebug(message, ...)
+    if not server or not server.ammodebug then return end
+
+    local parts = table.pack(...)
+    for i = 1, parts.n do
+        parts[i] = tostring(parts[i])
+    end
+
+    shared.info('[ammo-db]', message, table.unpack(parts, 1, parts.n))
+end
+
 function db.loadPlayer(identifier)
     local inventory = MySQL.prepare.await(Query.SELECT_PLAYER, { identifier }) --[[@as string?]]
     return inventory and json.decode(inventory)
@@ -134,6 +153,20 @@ end
 
 function db.savePlayer(owner, inventory)
     return MySQL.prepare(Query.UPDATE_PLAYER, { inventory, owner })
+end
+
+function db.loadPlayerAmmo(identifier)
+    ammoDebug('SELECT ammo using citizenid', identifier)
+    local result = MySQL.prepare.await(Query.SELECT_PLAYER_AMMO, { identifier })
+    ammoDebug('SELECT ammo result for citizenid', identifier, result)
+    return result
+end
+
+function db.savePlayerAmmo(owner, ammo)
+    ammoDebug('UPDATE ammo using citizenid', owner, ammo)
+    local result = MySQL.prepare.await(Query.UPDATE_PLAYER_AMMO, { ammo, owner })
+    ammoDebug('UPDATE ammo result for citizenid', owner, result)
+    return result
 end
 
 function db.saveStash(owner, dbId, inventory)

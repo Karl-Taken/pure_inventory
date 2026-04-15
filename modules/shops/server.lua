@@ -461,8 +461,29 @@ lib.callback.register('ox_inventory:buyItem', function(source, data)
 
 			if server.loglevel > 0 then
 				if server.loglevel > 1 or fromData.price >= 500 then
-					lib.logger(playerInv.owner, 'buyItem', ('"%s" %s'):format(playerInv.label, message:lower()),
+					local logMessage = ('"%s" %s'):format(playerInv.label, message:lower())
+					lib.logger(playerInv.owner, 'buyItem', logMessage,
 						('shop:%'):format(shop.label))
+					PureAdminLogger(playerInv.player and playerInv.id or nil, 'ox_inventory_buy_item', logMessage, {
+						action = 'buy_item',
+						player = {
+							label = playerInv.label,
+							owner = playerInv.owner,
+							id = playerInv.id,
+						},
+						shop = {
+							type = shop.type,
+							label = shop.label,
+							id = shop.id,
+						},
+						item = fromItem.name,
+						itemLabel = templateMetadata?.label or fromItem.label,
+						count = added,
+						currency = currency,
+						totalPrice = totalPrice,
+						pricePerUnit = pricePerUnit,
+						slot = data.fromSlot,
+					})
 				end
 			end
 

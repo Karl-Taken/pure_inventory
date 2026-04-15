@@ -3,9 +3,7 @@ if not lib then return end
 local Utils = {}
 
 function Utils.PlayAnim(wait, dict, name, blendIn, blendOut, duration, flag, rate, lockX, lockY, lockZ)
-    lib.requestAnimDict(dict)
-    TaskPlayAnim(cache.ped, dict, name, blendIn, blendOut, duration, flag, rate, lockX, lockY, lockZ)
-    RemoveAnimDict(dict)
+    lib.playAnim(cache.ped, dict, name, blendIn, blendOut, duration, flag, rate, lockX, lockY, lockZ)
 
     if wait > 0 then Wait(wait) end
 end

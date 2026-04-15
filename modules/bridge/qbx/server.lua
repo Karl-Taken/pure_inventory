@@ -3,7 +3,16 @@ assert(lib.checkDependency('qbx_vehicles', '1.2.0'), 'qbx_vehicles v1.2.0 or hig
 local Inventory = require 'modules.inventory.server'
 local QBX = exports.qbx_core
 
-AddEventHandler('qbx_core:server:playerLoggedOut', server.playerDropped)
+AddEventHandler('qbx_core:server:playerLoggedOut', function(source)
+    server.savePlayerAmmoPools(source)
+    server.playerDropped(source)
+    server.clearPlayerAmmoPools(source)
+end)
+AddEventHandler('QBCore:Server:OnPlayerUnload', function(source)
+    server.savePlayerAmmoPools(source)
+    server.playerDropped(source)
+    server.clearPlayerAmmoPools(source)
+end)
 
 AddEventHandler('qbx_core:server:onGroupUpdate', function(source, groupName, groupGrade)
     local inventory = Inventory(source)
@@ -29,6 +38,12 @@ AddStateBagChangeHandler('loadInventory', nil, function(bagName, _, value)
     local plySrc = GetPlayerFromStateBagName(bagName)
     if not plySrc then return end
     setupPlayer(QBX:GetPlayer(plySrc).PlayerData)
+end)
+
+AddEventHandler('QBCore:Server:OnPlayerLoaded', function(source)
+    local player = QBX:GetPlayer(source)
+    if not player then return end
+    server.loadPlayerAmmoPools(player.PlayerData.citizenid)
 end)
 
 SetTimeout(500, function()
@@ -83,11 +98,14 @@ function server.buyLicense(inv, license)
 
     if player.PlayerData.metadata.licences[license.name] then
         return false, 'already_have'
-    elseif Inventory.GetItem(inv, 'money', false, true) < license.price then
+    elseif (exports.qbx_core:GetMoney(inv.id, 'cash') or 0) < license.price then
         return false, 'can_not_afford'
     end
 
-    Inventory.RemoveItem(inv, 'money', license.price)
+    if not exports.qbx_core:RemoveMoney(inv.id, 'cash', license.price, 'ox_inventory:buy_license') then
+        return false, 'can_not_afford'
+    end
+
     player.PlayerData.metadata.licences[license.name] = true
     player.Functions.SetMetaData('licences', player.PlayerData.metadata.licences)
 
@@ -118,54 +136,15 @@ local function normaliseCurrency(currency)
 end
 
 ---@diagnostic disable-next-line: duplicate-set-field
-function server.getCurrencyBalance(currency)
-    print(source)
+function server.getCurrencyBalance(source, currency)
     local normalised = normaliseCurrency(currency)
-    local player = QBX:GetPlayer(source)
-
-    if player then
-        if normalised == 'money' then
-            return player.PlayerData.money.cash or 0
-        elseif normalised == 'cash' then
-            return player.PlayerData.money.cash or 0
-        elseif normalised == 'bank' then
-            return player.PlayerData.money.bank or 0
-        end
-    end
+    local account = normalised == 'money' and 'cash' or normalised
+    return exports.qbx_core:GetMoney(source, account) or 0
 end
 
 ---@diagnostic disable-next-line: duplicate-set-field
-function server.removeCurrency(inv, currency, amount, context)
+function server.removeCurrency(source, currency, amount, context)
     local normalised = normaliseCurrency(currency)
-    print(source)
-    local player = QBX:GetPlayer(source)
-
-    if player then
-        local reason = context or 'ox_inventory:transaction'
-
-        if server.loglevel > 0 then
-            local preCash = player.PlayerData.money.cash
-            local preBank = player.PlayerData.money.bank
-        end
-
-        if normalised == 'money' then
-            player.Functions.RemoveMoney('cash', amount, reason)
-            if server.loglevel > 0 then
-                local postCash = player.PlayerData.money.cash
-            end
-            return true
-        elseif normalised == 'cash' then
-            player.Functions.RemoveMoney('cash', amount, reason)
-            if server.loglevel > 0 then
-                local postCash = player.PlayerData.money.cash
-            end
-            return true
-        elseif normalised == 'bank' then
-            player.Functions.RemoveMoney('bank', amount, reason)
-            if server.loglevel > 0 then
-                local postBank = player.PlayerData.money.bank
-            end
-            return true
-        end
-    end
+    local account = normalised == 'money' and 'cash' or normalised
+    return exports.qbx_core:RemoveMoney(source, account, amount, context or 'ox_inventory:transaction') or false
 end

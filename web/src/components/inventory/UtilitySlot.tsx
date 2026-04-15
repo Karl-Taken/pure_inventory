@@ -1,13 +1,21 @@
 import React, { useEffect, useMemo } from 'react';
-import { useDrag, useDrop } from 'react-dnd';
+import { useDrag, useDragDropManager, useDrop } from 'react-dnd';
 import { useMergeRefs } from '@floating-ui/react';
 import { DragSource, InventoryType, Slot, SlotWithItem, UtilityConfig } from '../../typings';
 import { getItemUrl, isSlotWithItem } from '../../helpers';
+import { useAppDispatch } from '../../store';
 import { fetchNui } from '../../utils/fetchNui';
 import vestIcon from '../../assets/svg/vest.svg';
 import backpackIcon from '../../assets/svg/backpack.svg';
 import othersIcon from '../../assets/svg/others.svg';
+import pocketIcon from '../../assets/svg/pocket.svg';
+import phoneIcon from '../../assets/svg/phone.svg';
+import parachuteIcon from '../../assets/svg/parachute.svg';
 import { Items } from '../../store/items';
+import useNuiEvent from '../../hooks/useNuiEvent';
+import { ItemsPayload } from '../../reducers/refreshSlots';
+import { openContextMenu } from '../../store/contextMenu';
+import FallbackItemImage from '../utils/FallbackItemImage';
 
 const transparentDragImage =
   typeof window !== 'undefined'
@@ -23,6 +31,8 @@ type UtilitySlotProps = {
   slot: Slot;
   inventoryType: InventoryType;
   config?: UtilityConfig;
+  hotkeyLabel?: string;
+  style?: React.CSSProperties;
 };
 
 const iconMap: Record<string, string> = {
@@ -32,9 +42,17 @@ const iconMap: Record<string, string> = {
   'backpack.svg': backpackIcon,
   'others': othersIcon,
   'others.svg': othersIcon,
+  'pocket': pocketIcon,
+  'pocket.svg': pocketIcon,
+  'phone': phoneIcon,
+  'phone.svg': phoneIcon,
+  'parachute': parachuteIcon,
+  'parachute.svg': parachuteIcon,
 };
 
-const UtilitySlot: React.FC<UtilitySlotProps> = ({ slotIndex, slot, inventoryType, config }) => {
+const UtilitySlot: React.FC<UtilitySlotProps> = ({ slotIndex, slot, inventoryType, config, hotkeyLabel, style }) => {
+  const manager = useDragDropManager();
+  const dispatch = useAppDispatch();
   const hasItem = isSlotWithItem(slot);
   const slotItem = hasItem ? (slot as SlotWithItem) : null;
   const zeroIndex = slotIndex - 1;
@@ -99,12 +117,16 @@ const UtilitySlot: React.FC<UtilitySlotProps> = ({ slotIndex, slot, inventoryTyp
       collect: (monitor) => ({
         isOver: monitor.isOver(),
       }),
-      canDrop: (source) => inventoryType === InventoryType.PLAYER && source.inventory === InventoryType.PLAYER,
+      canDrop: (source) =>
+        inventoryType === InventoryType.PLAYER &&
+        (source.inventory === InventoryType.PLAYER || source.inventory === InventoryType.UTILITY),
       drop: (source) => {
         if (inventoryType !== InventoryType.PLAYER) return;
         fetchNui<boolean>('moveToUtilitySlot', {
           utilitySlot: slotIndex,
           fromSlot: source.item.slot,
+          fromUtilitySlot:
+            typeof source.metadata?.utilitySlot === 'number' ? source.metadata.utilitySlot : undefined,
         });
       },
     }),
@@ -134,6 +156,17 @@ const UtilitySlot: React.FC<UtilitySlotProps> = ({ slotIndex, slot, inventoryTyp
       preview(transparentDragImage, { captureDraggingState: true });
     }
   }, [preview]);
+
+  useNuiEvent('refreshSlots', (data: { items?: ItemsPayload | ItemsPayload[] }) => {
+    if (!isDragging || !data.items) return;
+    if (!Array.isArray(data.items)) return;
+
+    const matchingUpdate = data.items.find((entry) => entry.item?.slot === slot.slot);
+
+    if (!matchingUpdate) return;
+
+    manager.dispatch({ type: 'dnd-core/END_DRAG' });
+  });
 
   const refs = useMergeRefs([drop, drag, preview]);
 
@@ -170,35 +203,57 @@ const UtilitySlot: React.FC<UtilitySlotProps> = ({ slotIndex, slot, inventoryTyp
 
   const rarity = hasItem && slotItem ? (slotItem.metadata?.rarity || Items[slotItem.name]?.rarity) : undefined;
   const rarityClass = rarity ? ` rarity-${rarity.toLowerCase()}` : '';
+  const utilityHotkeyProps = hotkeyLabel ? { 'data-hotkey': hotkeyLabel } : {};
+
+  const handleContext = (event: React.MouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+
+    if (inventoryType !== InventoryType.PLAYER || !slotItem) return;
+
+    dispatch(
+      openContextMenu({
+        item: slotItem,
+        coords: { x: event.clientX, y: event.clientY },
+        inventoryType: InventoryType.PLAYER,
+      })
+    );
+  };
 
   return (
     <div
       ref={refs}
+      onContextMenu={handleContext}
       className={`utility-slot${hasItem ? ' has-item' : ''}${isOver ? ' drag-over' : ''}${rarityClass}`}
       data-slot={slot.slot}
       data-slot-index={slot.slot}
       data-inventory-type={inventoryType}
       data-inventory-id=""
       data-utility={slotIndex}
-      style={{ opacity: isDragging ? 0.4 : 1, '--borderColor': rarity ? '#ffffff' : undefined } as React.CSSProperties}
+      {...utilityHotkeyProps}
+      style={{
+        opacity: isDragging ? 0.4 : 1,
+        '--borderColor': rarity ? '#ffffff' : undefined,
+        ...style,
+      } as React.CSSProperties}
     >
       <div className="rarity-glow" />
       {configuredLabel && <div className="utility-slot-label">{configuredLabel}</div>}
       {iconSource && <img className="utility-slot-icon" src={iconSource} alt="" style={iconStyle} />}
       {hasItem && slotItem && (
         <div className="item-slot-content">
+          {rarity ? <div className="item-rarity-label">{rarity.toUpperCase()}</div> : null}
           {amountText && (
             <div className="item-slot-amount">
               <span>{amountText}x</span>
             </div>
           )}
           <div className="item-slot-img">
-            <img src={getItemUrl(slotItem)} alt={itemLabel} />
+            <FallbackItemImage src={getItemUrl(slotItem)} alt={itemLabel} />
           </div>
           <div className="item-slot-footer">
             <span className="item-name">{itemLabel}</span>
-            <span className="item-weight">{weightText}</span>
           </div>
+          <span className="item-weight">{weightText}</span>
           {durability !== null && (
             <div className="item-slot-durability">
               <div
@@ -214,4 +269,3 @@ const UtilitySlot: React.FC<UtilitySlotProps> = ({ slotIndex, slot, inventoryTyp
 };
 
 export default UtilitySlot;
-

@@ -5,6 +5,14 @@ export type UtilityConfig = {
   icons?: Record<number, string>;
   iconSizes?: Record<number, number>;
   items?: Record<number, string[]>;
+  hotbarSlots?: number[];
+  hotkeys?: Record<number, string>;
+  quickSlotLabels?: Record<number, string>;
+  tabHotkeys?: {
+    inventory?: string;
+    utility?: string;
+  };
+  layout?: Record<number, { row?: number; column?: number }>;
 };
 
 export type UtilityState = {

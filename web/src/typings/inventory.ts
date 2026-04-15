@@ -17,6 +17,7 @@ export type Inventory = {
   type: string;
   slots: number;
   items: Slot[];
+  weight?: number;
   maxWeight?: number;
   label?: string;
   groups?: Record<string, number>;
@@ -24,6 +25,7 @@ export type Inventory = {
   utilityConfig?: UtilityConfig;
   backpack?: Inventory;
   otherBackpack?: Inventory;
+  weaponMagazine?: Inventory;
   storage?: Inventory;
   crafting?: {
     xp?: {

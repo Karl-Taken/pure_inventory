@@ -6,7 +6,22 @@ require 'modules.interface.client'
 local Utils = require 'modules.utils.client'
 local Weapon = require 'modules.weapon.client'
 local Utility = require 'modules.utility.client'
+local Items
 local currentWeapon
+local playerBackpack
+local MagazineData = lib.load('data.magazines') or {}
+local MagazineItems = {}
+local weightDebugEnabled = false
+
+local function weightDebug(...)
+	if not weightDebugEnabled then return end
+	print('[ox_inventory][weight]', ...)
+end
+
+for ammoType, data in pairs(MagazineData) do
+	data.ammoType = ammoType
+	MagazineItems[data.name] = data
+end
 
 exports('getCurrentWeapon', function()
 	return currentWeapon
@@ -21,6 +36,7 @@ RegisterNetEvent('ox_inventory:clearWeapons', function()
 end)
 
 RegisterNetEvent('ox_inventory:utility:setBackpack', function(backpack)
+	playerBackpack = backpack or nil
 	SendNUIMessage({
 		action = 'setPlayerBackpack',
 		data = backpack
@@ -46,6 +62,783 @@ local dropObjects = {}
 local dropObjectsByNetId = {}
 client.dropObjects = dropObjects
 client.dropObjectsByNetId = dropObjectsByNetId
+local weaponModelFromName
+local giveItemToTarget
+local isGiveTargetValid
+
+local function throwDebug(...)
+	if not shared.ammodebug then return end
+
+	local parts = table.pack(...)
+	for i = 1, parts.n do
+		parts[i] = tostring(parts[i])
+	end
+
+	lib.print.info('[throw-debug]', table.unpack(parts, 1, parts.n))
+end
+
+local function placeDropEntity(entity, coords, disableCollision)
+	if not entity or not DoesEntityExist(entity) then return end
+
+	SetEntityCoordsNoOffset(entity, coords.x, coords.y, coords.z, false, false, false)
+	PlaceObjectOnGroundOrObjectProperly(entity)
+	FreezeEntityPosition(entity, true)
+
+	if disableCollision == nil or disableCollision then
+		SetEntityCollision(entity, false, false)
+	else
+		SetEntityCollision(entity, true, true)
+	end
+end
+
+local function addDropTarget(entity, dropId)
+	if not entity or not DoesEntityExist(entity) then return end
+
+	exports.ox_target:addLocalEntity(entity, {
+		{
+			name = 'pickup_drop',
+			icon = 'fa-solid fa-box-open',
+			label = 'Open Drop',
+			distance = 3.5,
+			onSelect = function()
+				exports.ox_inventory:openInventory('drop', dropId)
+			end
+		}
+	})
+end
+
+local function resolveThrowPreviewModel(item, props)
+	if item?.name then
+		local weaponModel = weaponModelFromName(tostring(item.name))
+		if weaponModel then
+			return weaponModel
+		end
+	end
+
+	local model = props?.modelp or props?.prop
+
+	if type(model) == 'table' then
+		model = model.modelp or model.model
+	end
+
+	if type(model) == 'string' then
+		model = joaat(model)
+	end
+
+	if model and model ~= 0 and (IsModelValid(model) or IsModelInCdimage(model)) then
+		return model
+	end
+end
+
+local function getThrowWeightProfile(itemWeight)
+	local weight = math.max(0, tonumber(itemWeight) or 0)
+	local weightKg = weight / 1000.0
+	local heavyScale = math.min(weightKg / 4.5, 1.0)
+	local lightScale = 1.0 - heavyScale
+	local throwDistance = 1.0 + (lightScale * 12.0)
+	local previewDistance = 2.0 + (lightScale * 1.5)
+	local basePeakHeight = 0.65 + (lightScale * 1.05)
+	local durationScale = 0.88 + (lightScale * 0.28)
+
+	throwDebug('throw_weight_profile', 'weight', weight, 'weightKg', string.format('%.2f', weightKg), 'heavyScale',
+		string.format('%.2f', heavyScale), 'throwDistance', string.format('%.2f', throwDistance), 'previewDistance',
+		string.format('%.2f', previewDistance), 'basePeakHeight', string.format('%.2f', basePeakHeight),
+		'durationScale', string.format('%.2f', durationScale))
+
+return {
+		weight = weight,
+		weightKg = weightKg,
+		heavyScale = heavyScale,
+		lightScale = lightScale,
+		throwDistance = throwDistance,
+		previewDistance = previewDistance,
+		basePeakHeight = basePeakHeight,
+		durationScale = durationScale,
+	}
+end
+
+local function resolveTargetGroundCoords(targetCoords)
+	local startCoords = vec3(targetCoords.x, targetCoords.y, targetCoords.z + 12.0)
+	local endCoords = vec3(targetCoords.x, targetCoords.y, targetCoords.z - 80.0)
+	local groundHandle = StartShapeTestLosProbe(startCoords.x, startCoords.y, startCoords.z, endCoords.x, endCoords.y,
+		endCoords.z, 511, cache.ped, 4)
+
+	while true do
+		Wait(0)
+		local groundRetval, groundHit, groundEndCoords = GetShapeTestResult(groundHandle)
+
+		if groundRetval ~= 1 then
+			if groundHit then
+				return vec3(groundEndCoords.x, groundEndCoords.y, groundEndCoords.z + 0.02)
+			end
+
+			return vec3(targetCoords.x, targetCoords.y, targetCoords.z)
+		end
+	end
+end
+
+local function getThrowPreviewCoords(itemWeight, ignoredEntity)
+	local profile = getThrowWeightProfile(itemWeight)
+	local camCoords = GetGameplayCamCoord()
+	local camRot = GetGameplayCamRot(2)
+	local pitch = math.rad(camRot.x)
+	local yaw = math.rad(camRot.z)
+	local forward = vec3(-math.sin(yaw) * math.cos(pitch), math.cos(yaw) * math.cos(pitch), math.sin(pitch))
+	local destination = camCoords + (forward * profile.throwDistance)
+	local restoreVisibility
+	local minDistance = math.max(0.5, profile.throwDistance * 0.28)
+
+	if ignoredEntity and DoesEntityExist(ignoredEntity) then
+		restoreVisibility = IsEntityVisible(ignoredEntity)
+		SetEntityVisible(ignoredEntity, false, false)
+	end
+
+	local handle = StartShapeTestLosProbe(camCoords.x, camCoords.y, camCoords.z, destination.x, destination.y, destination.z, 511, cache.ped, 4)
+
+	while true do
+		Wait(0)
+		local retval, hit, endCoords, _, hitEntity = GetShapeTestResult(handle)
+
+		if retval ~= 1 then
+			if ignoredEntity and DoesEntityExist(ignoredEntity) then
+				SetEntityVisible(ignoredEntity, restoreVisibility ~= false, false)
+			end
+
+			if hit then
+				local hitCoords = vec3(endCoords.x, endCoords.y, endCoords.z + 0.02)
+				local hitDistance = #(hitCoords - camCoords)
+
+				if hitEntity and hitEntity ~= 0 and hitEntity ~= ignoredEntity then
+					return hitCoords
+				end
+
+				if hitDistance >= minDistance then
+					return hitCoords
+				end
+
+				local adjustedCoords = resolveTargetGroundCoords(destination)
+				throwDebug('throw_target_adjusted', 'originalDistance', string.format('%.2f', hitDistance), 'minimumDistance',
+					string.format('%.2f', minDistance), 'adjustedTarget', json.encode(adjustedCoords))
+				return adjustedCoords
+			end
+
+			return resolveTargetGroundCoords(destination)
+		end
+	end
+end
+
+local function getThrowPreviewPoint(maxDistance, itemWeight)
+	local profile = getThrowWeightProfile(itemWeight)
+	local camCoords = GetGameplayCamCoord()
+	local camRot = GetGameplayCamRot(2)
+	local pitch = math.rad(camRot.x)
+	local yaw = math.rad(camRot.z)
+	local forward = vec3(-math.sin(yaw) * math.cos(pitch), math.cos(yaw) * math.cos(pitch), math.sin(pitch))
+	local destination = camCoords + (forward * math.min(maxDistance or profile.previewDistance, profile.previewDistance))
+	local handle = StartShapeTestLosProbe(camCoords.x, camCoords.y, camCoords.z, destination.x, destination.y, destination.z, 511, cache.ped, 4)
+
+	while true do
+		Wait(0)
+		local retval, hit, endCoords, _, hitEntity = GetShapeTestResult(handle)
+
+		if retval ~= 1 then
+			if hit then
+				return vec3(endCoords.x, endCoords.y, endCoords.z + 0.02), hitEntity, true
+			end
+
+			local fallback = GetOffsetFromEntityInWorldCoords(cache.ped, 0.0, 1.75, 0.0)
+			return vec3(fallback.x, fallback.y, fallback.z), nil, false
+		end
+	end
+end
+
+local function getPlacePreviewCoords(itemWeight, ignoredEntity)
+	local profile = getThrowWeightProfile(itemWeight)
+	local camCoords = GetGameplayCamCoord()
+	local camRot = GetGameplayCamRot(2)
+	local pitch = math.rad(camRot.x)
+	local yaw = math.rad(camRot.z)
+	local forward = vec3(-math.sin(yaw) * math.cos(pitch), math.cos(yaw) * math.cos(pitch), math.sin(pitch))
+	local maxPlaceDistance = 5.0
+	local destination = camCoords + (forward * math.min(profile.throwDistance, maxPlaceDistance))
+	local restoreVisibility
+
+	if ignoredEntity and DoesEntityExist(ignoredEntity) then
+		restoreVisibility = IsEntityVisible(ignoredEntity)
+		SetEntityVisible(ignoredEntity, false, false)
+	end
+
+	local handle = StartShapeTestLosProbe(camCoords.x, camCoords.y, camCoords.z, destination.x, destination.y,
+		destination.z, 511, cache.ped, 4)
+
+	while true do
+		Wait(0)
+		local retval, hit, endCoords = GetShapeTestResult(handle)
+
+		if retval ~= 1 then
+			if ignoredEntity and DoesEntityExist(ignoredEntity) then
+				SetEntityVisible(ignoredEntity, restoreVisibility ~= false, false)
+			end
+
+			if hit then
+				return vec3(endCoords.x, endCoords.y, endCoords.z + 0.02)
+			end
+
+			return resolveTargetGroundCoords(destination)
+		end
+	end
+end
+
+local function startNativeBallCleanup(ped, baseballPropHash, debugScope, durationMs, focusCoords, radius)
+	CreateThread(function()
+		local expiresAt = GetGameTimer() + (durationMs or 2200)
+		local searchRadius = radius or 20.0
+		local lastLoggedEntity
+
+		while GetGameTimer() < expiresAt do
+			local searchCoords = focusCoords or GetEntityCoords(ped)
+			local nativeBall = GetClosestObjectOfType(searchCoords.x, searchCoords.y, searchCoords.z, searchRadius,
+				baseballPropHash, false, false, false)
+
+			if nativeBall and nativeBall ~= 0 and DoesEntityExist(nativeBall) then
+				SetEntityVisible(nativeBall, false, false)
+				SetEntityCollision(nativeBall, false, false)
+				DeleteEntity(nativeBall)
+
+				if nativeBall ~= lastLoggedEntity then
+					lastLoggedEntity = nativeBall
+					throwDebug(debugScope .. ':native_ball_cleanup', 'entity', nativeBall)
+				end
+			end
+
+			Wait(0)
+		end
+	end)
+end
+
+local function animateThrownEntity(entity, startCoords, targetCoords, itemWeight, debugScope)
+	if not entity or not DoesEntityExist(entity) or not startCoords or not targetCoords then return end
+
+	local profile = getThrowWeightProfile(itemWeight)
+	local dx = targetCoords.x - startCoords.x
+	local dy = targetCoords.y - startCoords.y
+	local dz = targetCoords.z - startCoords.z
+	local distance = math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
+	local duration = math.max(260, math.min(900, math.floor((240 + (distance * 110.0)) * profile.durationScale)))
+	local peakHeight = profile.basePeakHeight + math.min(distance * 0.16, 1.2)
+	local heading = distance > 0.001 and GetHeadingFromVector_2d(dx, dy) or GetEntityHeading(entity)
+
+	throwDebug(debugScope .. ':arc_start', 'entity', entity, 'distance', string.format('%.2f', distance), 'duration',
+		duration, 'peakHeight', string.format('%.2f', peakHeight), 'target', json.encode(targetCoords))
+
+	CreateThread(function()
+		local startedAt = GetGameTimer()
+
+		SetEntityCollision(entity, false, false)
+		SetEntityDynamic(entity, false)
+		FreezeEntityPosition(entity, true)
+
+		while DoesEntityExist(entity) do
+			local elapsed = GetGameTimer() - startedAt
+			local t = math.min(elapsed / duration, 1.0)
+			local invT = 1.0 - t
+			local arcHeight = 4.0 * peakHeight * t * invT
+			local x = startCoords.x + (dx * t)
+			local y = startCoords.y + (dy * t)
+			local z = startCoords.z + (dz * t) + arcHeight
+
+			SetEntityCoordsNoOffset(entity, x, y, z, false, false, false)
+			SetEntityHeading(entity, heading)
+
+			if t >= 1.0 then
+				break
+			end
+
+			Wait(0)
+		end
+
+		if DoesEntityExist(entity) then
+			SetEntityCoordsNoOffset(entity, targetCoords.x, targetCoords.y, targetCoords.z, false, false, false)
+			throwDebug(debugScope .. ':cleanup_timeout', 'entity', entity, 'coords', json.encode(GetEntityCoords(entity)))
+			DeleteEntity(entity)
+		end
+	end)
+end
+
+local function startBaseballThrowMode(model, itemWeight)
+	if not model then return false end
+
+	local ped = cache.ped
+	local baseballHash = `WEAPON_BALL`
+	local baseballPropHash = joaat('w_am_baseball')
+	local threw = false
+	local throwStartCoords
+	local throwTargetCoords
+
+	throwDebug('startBaseballThrowMode:start', 'model', model, 'weight', itemWeight, 'selectedWeaponBefore',
+		GetSelectedPedWeapon(ped))
+
+	lib.requestModel(model)
+
+	GiveWeaponToPed(ped, baseballHash, 1, false, true)
+	SetPedAmmo(ped, baseballHash, 1)
+	SetPedInfiniteAmmoClip(ped, true)
+	SetCurrentPedWeapon(ped, baseballHash, true)
+	SetPedCurrentWeaponVisible(ped, false, false, false, false)
+	throwDebug('startBaseballThrowMode:weapon_prepared', 'weapon', baseballHash, 'hasWeapon',
+		HasPedGotWeapon(ped, baseballHash, false) and 'true' or 'false', 'selectedWeaponAfter',
+		GetSelectedPedWeapon(ped), 'ammo', GetAmmoInPedWeapon(ped, baseballHash))
+
+	local handCoords = GetPedBoneCoords(ped, 57005, 0.1, 0.0, 0.0)
+	local entity = CreateObject(model, handCoords.x, handCoords.y, handCoords.z, true, true, false)
+
+	if not entity or not DoesEntityExist(entity) then
+		throwDebug('startBaseballThrowMode:create_failed', 'model', model)
+		SetModelAsNoLongerNeeded(model)
+		RemoveWeaponFromPed(ped, baseballHash)
+		SetPedInfiniteAmmoClip(ped, false)
+		SetCurrentPedWeapon(ped, `WEAPON_UNARMED`, true)
+		SetPedCurrentWeaponVisible(ped, true, false, false, false)
+		return false
+	end
+
+	SetEntityAsMissionEntity(entity, true, true)
+	SetEntityCollision(entity, false, false)
+	SetEntityDynamic(entity, false)
+	SetEntityInvincible(entity, true)
+	NetworkRegisterEntityAsNetworked(entity)
+
+	local netId = NetworkGetNetworkIdFromEntity(entity)
+
+	if netId and netId ~= 0 then
+		SetNetworkIdCanMigrate(netId, true)
+		SetNetworkIdExistsOnAllMachines(netId, true)
+	end
+
+	AttachEntityToEntity(entity, ped, GetPedBoneIndex(ped, 57005), 0.14, 0.02, -0.02, 0.0, 92.0, 8.0,
+		false, false, false, false, 2, true)
+	throwDebug('startBaseballThrowMode:entity_attached', 'entity', entity, 'netId', netId or 0)
+	SetModelAsNoLongerNeeded(model)
+
+	startNativeBallCleanup(ped, baseballPropHash, 'startBaseballThrowMode', 2200, nil, 22.0)
+
+	local timeoutAt = GetGameTimer() + 4500
+
+	while DoesEntityExist(entity) and GetGameTimer() < timeoutAt do
+		DisableFrontendThisFrame()
+		SetCurrentPedWeapon(ped, baseballHash, true)
+		SetPedAmmo(ped, baseballHash, 1)
+		SetPedCurrentWeaponVisible(ped, false, false, false, false)
+
+		if IsControlJustReleased(2, 200) then
+			throwDebug('startBaseballThrowMode:cancelled', 'entity', entity)
+			break
+		end
+
+		if IsPedShooting(ped) then
+			threw = true
+			throwStartCoords = GetPedBoneCoords(ped, 57005, 0.18, 0.0, 0.0)
+			throwTargetCoords = getThrowPreviewCoords(itemWeight, entity)
+
+			throwDebug('startBaseballThrowMode:shot_detected', 'entity', entity, 'start', json.encode(throwStartCoords),
+				'target', json.encode(throwTargetCoords), 'selectedWeapon', GetSelectedPedWeapon(ped))
+
+			DetachEntity(entity, true, true)
+			Wait(0)
+
+			if DoesEntityExist(entity) then
+				SetEntityInvincible(entity, true)
+				animateThrownEntity(entity, throwStartCoords, throwTargetCoords, itemWeight, 'startBaseballThrowMode')
+				startNativeBallCleanup(ped, baseballPropHash, 'startBaseballThrowMode', 2600, throwTargetCoords,
+					math.max(18.0, #(throwTargetCoords - throwStartCoords) + 8.0))
+			end
+
+			break
+		end
+
+		Wait(0)
+	end
+
+	if not threw and DoesEntityExist(entity) then
+		DetachEntity(entity, true, true)
+		DeleteEntity(entity)
+	end
+
+	RemoveWeaponFromPed(ped, baseballHash)
+	SetPedInfiniteAmmoClip(ped, false)
+	SetCurrentPedWeapon(ped, `WEAPON_UNARMED`, true)
+	SetPedCurrentWeaponVisible(ped, true, false, false, false)
+	throwDebug('startBaseballThrowMode:cleanup_complete', 'threw', threw and 'true' or 'false', 'selectedWeaponEnd',
+		GetSelectedPedWeapon(ped))
+
+	return threw, throwStartCoords, throwTargetCoords
+end
+
+local function playNetworkedThrowVisual(model, startCoords, targetCoords, itemWeight)
+	if not model or not startCoords or not targetCoords then return end
+
+	throwDebug('playNetworkedThrowVisual:start', 'model', model, 'start', json.encode(startCoords), 'target',
+		json.encode(targetCoords), 'weight', itemWeight)
+
+	CreateThread(function()
+		local ped = cache.ped
+		local baseballHash = `WEAPON_BALL`
+		local baseballPropHash = joaat('w_am_baseball')
+
+		throwDebug('playNetworkedThrowVisual:thread_started', 'ped', ped, 'playerPed', playerPed, 'selectedWeaponBefore',
+			GetSelectedPedWeapon(ped))
+
+		lib.requestModel(model)
+
+		GiveWeaponToPed(ped, baseballHash, 1, false, true)
+		SetPedAmmo(ped, baseballHash, 1)
+		SetPedInfiniteAmmoClip(ped, true)
+		SetCurrentPedWeapon(ped, baseballHash, true)
+		SetPedCurrentWeaponVisible(ped, false, false, false, false)
+		throwDebug('playNetworkedThrowVisual:weapon_prepared', 'weapon', baseballHash, 'selectedWeaponAfter',
+			GetSelectedPedWeapon(ped), 'ammo', GetAmmoInPedWeapon(ped, baseballHash))
+
+		local entity = CreateObject(model, startCoords.x, startCoords.y, startCoords.z, true, true, false)
+
+		if not entity or not DoesEntityExist(entity) then
+			throwDebug('playNetworkedThrowVisual:create_failed', 'model', model)
+			SetModelAsNoLongerNeeded(model)
+			RemoveWeaponFromPed(ped, baseballHash)
+			SetPedInfiniteAmmoClip(ped, false)
+			SetCurrentPedWeapon(ped, `WEAPON_UNARMED`, true)
+			SetPedCurrentWeaponVisible(ped, true, false, false, false)
+			return
+		end
+
+		throwDebug('playNetworkedThrowVisual:created', 'entity', entity, 'coords', json.encode(GetEntityCoords(entity)))
+
+		SetEntityAsMissionEntity(entity, true, true)
+		SetEntityCollision(entity, false, false)
+		SetEntityDynamic(entity, false)
+		SetEntityInvincible(entity, true)
+		NetworkRegisterEntityAsNetworked(entity)
+
+		local netId = NetworkGetNetworkIdFromEntity(entity)
+
+		if netId and netId ~= 0 then
+			SetNetworkIdCanMigrate(netId, true)
+			SetNetworkIdExistsOnAllMachines(netId, true)
+		end
+
+		AttachEntityToEntity(entity, ped, GetPedBoneIndex(ped, 57005), 0.14, 0.02, -0.02, 0.0, 92.0, 8.0,
+			false, false, false, false, 2, true)
+
+		throwDebug('playNetworkedThrowVisual:attached', 'entity', entity, 'netId', netId or 0)
+		SetModelAsNoLongerNeeded(model)
+
+		startNativeBallCleanup(ped, baseballPropHash, 'playNetworkedThrowVisual', 2200, nil, 22.0)
+
+		local threw = false
+		local timeoutAt = GetGameTimer() + 2500
+		local lastSelectedWeapon
+		local loggedWeaponMismatch = false
+
+		while DoesEntityExist(entity) and GetGameTimer() < timeoutAt do
+			SetCurrentPedWeapon(ped, baseballHash, true)
+			SetPedAmmo(ped, baseballHash, 1)
+			SetPedCurrentWeaponVisible(ped, false, false, false, false)
+
+			local selectedWeapon = GetSelectedPedWeapon(ped)
+
+			if lastSelectedWeapon ~= selectedWeapon then
+				lastSelectedWeapon = selectedWeapon
+				throwDebug('playNetworkedThrowVisual:selected_weapon_changed', 'selectedWeapon', selectedWeapon, 'expected',
+					baseballHash)
+			end
+
+			if not loggedWeaponMismatch and selectedWeapon ~= baseballHash then
+				loggedWeaponMismatch = true
+				throwDebug('playNetworkedThrowVisual:weapon_mismatch_detected', 'selectedWeapon', selectedWeapon, 'expected',
+					baseballHash)
+			end
+
+			if IsPedShooting(ped) then
+				threw = true
+				throwDebug('playNetworkedThrowVisual:shot_detected', 'selectedWeapon', selectedWeapon, 'entity', entity)
+				DetachEntity(entity, true, true)
+				Wait(0)
+
+				if DoesEntityExist(entity) then
+					SetEntityInvincible(entity, true)
+					animateThrownEntity(entity, startCoords, targetCoords, itemWeight, 'playNetworkedThrowVisual')
+					startNativeBallCleanup(ped, baseballPropHash, 'playNetworkedThrowVisual', 2600, targetCoords,
+						math.max(18.0, #(targetCoords - startCoords) + 8.0))
+				end
+
+				break
+			end
+
+			Wait(0)
+		end
+
+		if not threw and DoesEntityExist(entity) then
+			throwDebug('playNetworkedThrowVisual:cleanup_no_shot', 'entity', entity, 'selectedWeaponFinal',
+				GetSelectedPedWeapon(ped), 'ammoFinal', GetAmmoInPedWeapon(ped, baseballHash))
+			DetachEntity(entity, true, true)
+			DeleteEntity(entity)
+		end
+
+		RemoveWeaponFromPed(ped, baseballHash)
+		SetPedInfiniteAmmoClip(ped, false)
+		SetCurrentPedWeapon(ped, `WEAPON_UNARMED`, true)
+		SetPedCurrentWeaponVisible(ped, true, false, false, false)
+		throwDebug('playNetworkedThrowVisual:cleanup_complete', 'selectedWeaponEnd', GetSelectedPedWeapon(ped))
+	end)
+end
+
+RegisterNetEvent('ox_inventory:playThrowVisual', function(model, startCoords, targetCoords, itemWeight)
+	playNetworkedThrowVisual(model, startCoords, targetCoords, itemWeight)
+end)
+
+local function findClosestGiveTarget()
+	local nearbyPlayers = lib.getNearbyPlayers(GetEntityCoords(playerPed), 3.0)
+	local closestServerId
+	local closestDistance
+
+	for i = 1, #nearbyPlayers do
+		local option = nearbyPlayers[i]
+
+		if isGiveTargetValid(option.ped, option.coords) then
+			local distance = #(GetEntityCoords(playerPed, true) - option.coords)
+
+			if not closestDistance or distance < closestDistance then
+				closestDistance = distance
+				closestServerId = GetPlayerServerId(option.id)
+			end
+		end
+	end
+
+	return closestServerId
+end
+
+local function getThrowItemWeight(item, props, amount)
+	local definition = item?.name and Items[item.name]
+	local unitWeight = tonumber(item?.weight)
+
+	if not unitWeight or unitWeight <= 0 then
+		unitWeight = tonumber(props?.weight)
+	end
+
+	if (not unitWeight or unitWeight <= 0) and definition then
+		unitWeight = tonumber(definition.weight)
+	end
+
+	return math.max(0, unitWeight or 0) * math.max(amount or 1, 1)
+end
+
+local function computeUtilityWeight(items)
+	if not Utility.enabled then return 0 end
+
+	local total = 0
+
+	-- Use the canonical utility state to avoid missing items (e.g., armour) when slot offsets/metadata differ
+	local utilityState = Utility.collect(items)
+
+	if not utilityState or not utilityState.items then
+		return 0
+	end
+
+	for _, slotData in pairs(utilityState.items) do
+		if slotData and slotData.name then
+			local def = Items and Items[slotData.name]
+			local unitWeight = tonumber(slotData.weight)
+			local weightSource = 'slotData.weight'
+
+			-- Fall back to metadata-provided weights (containers/utility often inject size/weight)
+			if (not unitWeight or unitWeight <= 0) and slotData.metadata then
+				unitWeight = tonumber(slotData.metadata.weight)
+					or tonumber(slotData.metadata?.size and slotData.metadata.size[2])
+				if unitWeight and unitWeight > 0 then
+					weightSource = 'metadata'
+				end
+			end
+
+			-- Final fallback: static item definition
+			if not unitWeight or unitWeight <= 0 then
+				unitWeight = def and tonumber(def.weight) or 0
+				weightSource = 'definition'
+			end
+
+			local count = slotData.count or 1
+			weightDebug(('slot %s (%s) x%s -> %sg (%s)'):format(
+				tostring(slotData.slot or '?'),
+				slotData.name,
+				count,
+				unitWeight * count,
+				weightSource
+			))
+			total += unitWeight * count
+		end
+	end
+
+	weightDebug('utility total', total)
+	return total
+end
+
+local function applyUtilityWeight(baseWeight, items)
+	local utilityWeight = computeUtilityWeight(items or PlayerData.inventory)
+	weightDebug('server weight', baseWeight or 0, 'utility breakdown', utilityWeight)
+
+	if (baseWeight or 0) ~= PlayerData.weight then
+		client.setPlayerData('weight', baseWeight or 0)
+	end
+
+	return utilityWeight
+end
+
+local function startItemThrowPreview(item, props, amount, data)
+	local model = resolveThrowPreviewModel(item, props)
+	local itemWeight = getThrowItemWeight(item, props, amount)
+	local throwProfile = getThrowWeightProfile(itemWeight)
+
+	if not model then return false end
+
+	lib.requestModel(model)
+	local previewCoords = GetOffsetFromEntityInWorldCoords(cache.ped, 0.0, 1.5, 0.0)
+	local previewEntity = CreateObject(model, previewCoords.x, previewCoords.y, previewCoords.z, false, false, false)
+
+	if not previewEntity or not DoesEntityExist(previewEntity) then
+		SetModelAsNoLongerNeeded(model)
+		return false
+	end
+
+	SetEntityAsMissionEntity(previewEntity, true, true)
+	SetEntityCollision(previewEntity, false, false)
+	SetEntityDynamic(previewEntity, false)
+	SetEntityInvincible(previewEntity, true)
+	SetEntityAlpha(previewEntity, 190, false)
+	SetModelAsNoLongerNeeded(model)
+
+	lib.showTextUI('[RMB] aim throw\n[N] place\n[G] give closest\n[ESC] cancel', {
+		position = 'bottom-center',
+	})
+
+	local placed = false
+	local response
+
+	while DoesEntityExist(previewEntity) do
+		DisableFrontendThisFrame()
+		DisableControlAction(0, 14, true)
+		DisableControlAction(0, 15, true)
+
+		local targetCoords = getPlacePreviewCoords(itemWeight, previewEntity)
+		SetEntityCoordsNoOffset(previewEntity, targetCoords.x, targetCoords.y, targetCoords.z, false, false, false)
+
+		local placePressed249 = IsControlJustPressed(0, 249)
+		local placePressed306 = IsControlJustPressed(0, 306)
+		local placePressedDisabled249 = IsDisabledControlJustPressed(0, 249)
+		local placePressedDisabled306 = IsDisabledControlJustPressed(0, 306)
+
+		if IsControlJustReleased(2, 200) then
+			break
+		end
+
+		if IsControlJustPressed(0, 47) then
+			local targetId = findClosestGiveTarget()
+
+			if targetId then
+				giveItemToTarget(targetId, item.slot or data.slot, amount, item.inventory)
+				placed = true
+				break
+			else
+				lib.notify({ type = 'error', description = 'No nearby player to give to.' })
+			end
+		end
+
+		if placePressed249 or placePressed306 or placePressedDisabled249 or placePressedDisabled306 then
+			local success
+			local placeStartCoords = GetPedBoneCoords(cache.ped, 57005, 0.18, 0.0, 0.0)
+			local pressedControl = placePressed249 and 249 or placePressed306 and 306 or placePressedDisabled249 and 'disabled_249' or 'disabled_306'
+
+			throwDebug('throw_place_key_pressed', 'control', pressedControl, 'slot', item.slot or data.slot, 'amount', amount,
+				'previewTarget', json.encode(targetCoords), 'playerCoords', json.encode(GetEntityCoords(cache.ped)))
+			throwDebug('throw_place_controls_state', '249', placePressed249 and 'true' or 'false', '306',
+				placePressed306 and 'true' or 'false', 'disabled_249', placePressedDisabled249 and 'true' or 'false',
+				'disabled_306', placePressedDisabled306 and 'true' or 'false')
+			throwDebug('throw_place_requested', 'slot', item.slot or data.slot, 'count', amount, 'target',
+				json.encode(targetCoords), 'start', json.encode(placeStartCoords), 'instance', currentInstance or 'nil',
+				'model', model, 'weight', itemWeight, 'previewDistance', string.format('%.2f', throwProfile.previewDistance),
+				'throwDistance', string.format('%.2f', throwProfile.throwDistance))
+			success, response = lib.callback.await('ox_inventory:throwItemDrop', false, {
+				slot = item.slot or data.slot,
+				count = amount,
+				coords = targetCoords,
+				instance = currentInstance,
+				model = model,
+				startCoords = placeStartCoords,
+			})
+			throwDebug('throw_place_response', 'success', success and 'true' or 'false', 'target',
+				json.encode(targetCoords), 'responseWeight', response and response.weight or 'nil', 'items',
+				response and response.items and json.encode(response.items) or 'nil')
+			placed = success and true or false
+			break
+		end
+
+		if IsControlPressed(0, 25) or IsPlayerFreeAiming(cache.playerId) then
+			throwDebug('startItemThrowPreview:enter_throw_mode', 'slot', item.slot or data.slot, 'model', model, 'weight',
+				itemWeight, 'throwDistance', string.format('%.2f', throwProfile.throwDistance), 'playerWeapon',
+				GetSelectedPedWeapon(cache.ped))
+			lib.hideTextUI()
+
+			if DoesEntityExist(previewEntity) then
+				DeleteEntity(previewEntity)
+			end
+
+			lib.showTextUI('[LMB] throw\n[ESC] cancel', {
+				position = 'bottom-center',
+			})
+			local success
+			local threw, throwStartCoords, throwTargetCoords = startBaseballThrowMode(model, itemWeight)
+
+			lib.hideTextUI()
+
+			if threw and throwStartCoords and throwTargetCoords then
+				throwDebug('throw_callback_request', 'slot', item.slot or data.slot, 'start', json.encode(throwStartCoords),
+					'target', json.encode(throwTargetCoords), 'weight', itemWeight, 'throwDistance',
+					string.format('%.2f', throwProfile.throwDistance))
+				success, response = lib.callback.await('ox_inventory:throwItemDrop', false, {
+					slot = item.slot or data.slot,
+					count = amount,
+					coords = throwTargetCoords,
+					instance = currentInstance,
+					model = model,
+					startCoords = throwStartCoords,
+					itemWeight = itemWeight,
+				})
+				throwDebug('throw_callback_response', 'success', success and 'true' or 'false', 'target',
+					json.encode(throwTargetCoords), 'responseWeight', response and response.weight or 'nil', 'items',
+					response and response.items and json.encode(response.items) or 'nil')
+				placed = success and true or false
+			else
+				throwDebug('startItemThrowPreview:throw_cancelled_or_failed', 'slot', item.slot or data.slot, 'model', model)
+			end
+
+			SetCurrentPedWeapon(cache.ped, `WEAPON_UNARMED`, true)
+			SetPedCurrentWeaponVisible(cache.ped, true, false, false, false)
+
+			return placed, response
+		end
+
+		Wait(0)
+	end
+
+	lib.hideTextUI()
+
+	if DoesEntityExist(previewEntity) then
+		DeleteEntity(previewEntity)
+	end
+
+	StopAnimTask(cache.ped, 'weapons@projectile@', 'aimlive_m_fb_stand', 1.0)
+	SetCurrentPedWeapon(cache.ped, `WEAPON_UNARMED`, true)
+	SetPedCurrentWeaponVisible(cache.ped, true, false, false, false)
+
+	return placed, response
+end
 
 lib.onCache('ped', function(ped)
 	playerPed = ped
@@ -129,6 +922,10 @@ end
 local CraftingBenches = require 'modules.crafting.client'
 local Vehicles = lib.load('data.vehicles')
 local Inventory = require 'modules.inventory.client'
+local getKeybindLabel
+local buildUtilityHotkeyLabels
+local buildInventoryTabHotkeys
+local applyDynamicUtilityConfig
 
 ---@param inv string?
 ---@param data any?
@@ -140,15 +937,30 @@ function client.openInventory(inv, data)
 		end
 
 		if IsNuiFocused() then
-			if inv == 'container' and currentInventory.id == PlayerData.inventory[data].metadata.container then
-				return client.closeInventory()
+			if inv == 'container' and type(data) == 'number' then
+				local containerItem = PlayerData.inventory[data]
+				local containerId = containerItem and containerItem.metadata and containerItem.metadata.container
+				local isWeaponMagazineContainer = containerItem and Items(containerItem.name)?.weapon and containerItem.metadata?.magContainer
+
+				if not isWeaponMagazineContainer and containerId and currentInventory.id == containerId then
+					return client.closeInventory()
+				end
+			end
+
+			if inv == 'weaponmag' and type(data) == 'number' then
+				local weaponSlot = PlayerData.inventory[data]
+				local magContainer = weaponSlot and weaponSlot.metadata and weaponSlot.metadata.magContainer
+
+				if magContainer and currentInventory.type == 'weaponmag' and currentInventory.id == magContainer then
+					return client.closeInventory()
+				end
 			end
 
 			if currentInventory.type == 'drop' and (not data or currentInventory.id == (type(data) == 'table' and data.id or data)) then
 				return client.closeInventory()
 			end
 
-			if inv ~= 'drop' and inv ~= 'container' then
+			if inv ~= 'drop' and inv ~= 'container' and inv ~= 'weaponmag' then
 				if (data?.id or data) == currentInventory?.id then
 					-- Triggering exports.ox_inventory:openInventory('stash', 'mystash') twice in rapid succession is weird behaviour
 					return warn(("script tried to open inventory, but it is already open\n%s"):format(Citizen
@@ -375,17 +1187,19 @@ function client.openInventory(inv, data)
 	end
 
 	if Utility.enabled then
-		left.utility = Utility.collect(PlayerData.inventory)
-		left.utilityConfig = Utility.config
+		left.utility = applyDynamicUtilityConfig(Utility.collect(PlayerData.inventory))
+		left.utilityConfig = left.utility and left.utility.config or Utility.config
 
 		if currentInventory then
 			if currentInventory.items and (currentInventory.type == 'player' or currentInventory.type == 'inspect') then
-				currentInventory.utility = Utility.collect(currentInventory.items)
+				currentInventory.utility = applyDynamicUtilityConfig(Utility.collect(currentInventory.items))
 			else
 				currentInventory.utility = nil
 			end
 		end
 	end
+
+	left.weight = PlayerData.weight
 
 	SendNUIMessage({
 		action = 'setupInventory',
@@ -445,13 +1259,14 @@ RegisterNetEvent('ox_inventory:forceOpenInventory', function(left, right)
 	currentInventory.ignoreSecurityChecks = true
 	left.items = PlayerData.inventory
 	left.groups = PlayerData.groups
+	left.weight = PlayerData.weight
 
 	if Utility.enabled then
-		left.utility = Utility.collect(PlayerData.inventory)
-		left.utilityConfig = Utility.config
+		left.utility = applyDynamicUtilityConfig(Utility.collect(PlayerData.inventory))
+		left.utilityConfig = left.utility and left.utility.config or Utility.config
 
 		if currentInventory and currentInventory.items then
-			currentInventory.utility = Utility.collect(currentInventory.items)
+			currentInventory.utility = applyDynamicUtilityConfig(Utility.collect(currentInventory.items))
 		end
 	end
 
@@ -465,7 +1280,7 @@ RegisterNetEvent('ox_inventory:forceOpenInventory', function(left, right)
 end)
 
 local Animations = lib.load('data.animations')
-local Items = require 'modules.items.client'
+Items = require 'modules.items.client'
 local usingItem = false
 
 ---@param data { name: string, label: string, count: number, slot: number, metadata: table<string, any>, weight: number }
@@ -539,14 +1354,643 @@ local function canUseItem(isAmmo)
 		and not IsPedShooting(playerPed)
 end
 
+local function getMagazineByAmmo(ammoType)
+	return MagazineData[ammoType]
+end
+
+local function getMagazineByItem(itemName)
+	return MagazineItems[itemName]
+end
+
+local function getMagazineRounds(slotData, config)
+	if not slotData then return 0 end
+
+	local metadata = slotData.metadata or {}
+	local capacity = metadata.capacity or config?.capacity or 0
+	local rounds = metadata.ammo or metadata.rounds or 0
+
+	if rounds > capacity then
+		rounds = capacity
+	end
+
+	return rounds
+end
+
+local function getAmmoSpecialType(slotData)
+	return slotData?.metadata?.type
+end
+
+local function findCompatibleMagazineSlot(ammoType, specialAmmo, requireRounds)
+	local magazine = getMagazineByAmmo(ammoType)
+
+	if not magazine then return end
+
+	local exactSlot
+	local exactRounds = -1
+	local fallbackSlot
+	local fallbackRounds = -1
+	local partialSlot
+	local emptySlot
+
+	for i = 1, #PlayerData.inventory do
+		local slotData = PlayerData.inventory[i]
+
+		if slotData and slotData.name == magazine.name then
+			local metadata = slotData.metadata or {}
+			local rounds = getMagazineRounds(slotData, magazine)
+			local capacity = metadata.capacity or magazine.capacity
+			local loadedSpecial = metadata.specialAmmo
+
+			if requireRounds then
+				if rounds > 0 then
+					if specialAmmo and loadedSpecial == specialAmmo and rounds > exactRounds then
+						exactSlot = i
+						exactRounds = rounds
+					elseif (not specialAmmo or not loadedSpecial) and rounds > fallbackRounds then
+						fallbackSlot = i
+						fallbackRounds = rounds
+					end
+				end
+			elseif rounds < capacity then
+				if specialAmmo and loadedSpecial == specialAmmo then
+					exactSlot = exactSlot or i
+				elseif rounds > 0 and not loadedSpecial then
+					partialSlot = partialSlot or i
+				elseif rounds == 0 then
+					emptySlot = emptySlot or i
+				end
+			end
+		end
+	end
+
+	if requireRounds then
+		return exactSlot or fallbackSlot
+	end
+
+	return exactSlot or partialSlot or emptySlot
+end
+
+local function findCompatibleAmmoSlotForMagazine(magazineSlot)
+	local slotData = PlayerData.inventory[magazineSlot]
+
+	if not slotData then return end
+
+	local magazineData = getMagazineByItem(slotData.name)
+
+	if not magazineData then return end
+
+	local metadata = slotData.metadata or {}
+	local rounds = getMagazineRounds(slotData, magazineData)
+	local loadedSpecial = metadata.specialAmmo
+
+	for i = 1, #PlayerData.inventory do
+		local ammoSlot = PlayerData.inventory[i]
+
+		if ammoSlot and ammoSlot.name == magazineData.ammoType and (ammoSlot.count or 0) > 0 then
+			local ammoSpecial = getAmmoSpecialType(ammoSlot)
+
+			if rounds == 0 or ammoSpecial == loadedSpecial then
+				return i
+			end
+		end
+	end
+end
+
+local function getMagazineFillDetails(ammoSlot, magazineSlot, requestedAmount)
+	local ammoSlotData = PlayerData.inventory[ammoSlot]
+	local magazineSlotData = PlayerData.inventory[magazineSlot]
+
+	if not ammoSlotData or not magazineSlotData then return nil, 'Invalid ammo or magazine slot.' end
+
+	local ammoData = Items[ammoSlotData.name]
+	local magazineData = getMagazineByItem(magazineSlotData.name)
+
+	if not ammoData?.ammo or not magazineData then return nil, 'This ammo cannot be loaded into that item.' end
+	if magazineData.ammoType ~= ammoSlotData.name then return nil, 'This ammo does not fit that magazine.' end
+
+	local currentRounds = getMagazineRounds(magazineSlotData, magazineData)
+	local capacity = magazineSlotData.metadata?.capacity or magazineData.capacity or 0
+	local remaining = capacity - currentRounds
+
+	if remaining < 1 then
+		return nil, 'That magazine is already full.'
+	end
+
+	local ammoSpecial = getAmmoSpecialType(ammoSlotData)
+	local loadedSpecial = magazineSlotData.metadata?.specialAmmo
+
+	if currentRounds > 0 and loadedSpecial ~= ammoSpecial then
+		return nil, 'This ammo does not match the rounds already loaded.'
+	end
+
+	local amount = math.min(requestedAmount or ammoSlotData.count or 0, ammoSlotData.count or 0, remaining)
+
+	if amount < 1 then
+		return nil, 'There is not enough ammo to load.'
+	end
+
+	return {
+		amount = amount,
+		ammoSpecial = ammoSpecial,
+		magazineLabel = magazineSlotData.metadata?.label or ammoSlotData.metadata?.label or magazineSlotData.label or ammoSlotData.label,
+	}
+end
+
+local function loadAmmoIntoMagazine(ammoSlot, magazineSlot, requestedAmount)
+	local fillData, err = getMagazineFillDetails(ammoSlot, magazineSlot, requestedAmount)
+
+	if not fillData then
+		if err then
+			lib.notify({ type = 'error', description = err })
+		end
+
+		return false
+	end
+
+	local success = lib.progressBar({
+		duration = fillData.amount * 500,
+		label = ('Loading %s'):format(fillData.magazineLabel or 'magazine'),
+		useWhileDead = false,
+		canCancel = true,
+		disable = {
+			sprint = true,
+			car = true,
+			combat = true,
+		},
+		anim = {
+			dict = 'anim@heists@narcotics@trash',
+			clip = 'idle',
+			flag = 49,
+		}
+	})
+
+	if not success then return false end
+
+	return lib.callback.await('ox_inventory:fillMagazine', false, ammoSlot, magazineSlot, fillData.amount, fillData.ammoSpecial) and true or false
+end
+
+local function loadMagazineIntoWeapon(magazineSlot, weapon)
+	local magazineItem = PlayerData.inventory[magazineSlot]
+
+	if not magazineItem or not weapon then return false end
+
+	local success = lib.progressBar({
+		duration = 2000,
+		label = ('Loading %s'):format(magazineItem.metadata?.label or magazineItem.label or 'magazine'),
+		useWhileDead = false,
+		canCancel = true,
+		disable = {
+			sprint = true,
+			car = true,
+			combat = true,
+		},
+		anim = {
+			dict = 'anim@amb@nightclub@mini@drinking@drinking_shots@ped_a@normal',
+			clip = 'pickup',
+			flag = 49,
+		}
+	})
+
+	if not success then return false end
+
+	return lib.callback.await('ox_inventory:loadMagazine', false, magazineSlot, weapon.slot)
+end
+
+local function updateLoadedMagazineRounds(weapon, rounds)
+	if weapon?.metadata?.loadedMagazine then
+		weapon.metadata.loadedMagazine.ammo = rounds
+		weapon.metadata.loadedMagazine.rounds = rounds
+		weapon.metadata.loadedMagazine.specialAmmo = weapon.metadata.specialAmmo
+	end
+end
+
+local function applyWeaponSpecialAmmo(weapon, specialAmmo)
+	local weaponData = Items[weapon.name]
+
+	if not weaponData?.model then
+		weapon.metadata.specialAmmo = specialAmmo
+		return
+	end
+
+	local clipComponentKey = ('%s_CLIP'):format(weaponData.model:gsub('WEAPON_', 'COMPONENT_'))
+	local previousSpecial = weapon.metadata.specialAmmo
+
+	if previousSpecial and previousSpecial ~= specialAmmo then
+		local oldClip = ('%s_%s'):format(clipComponentKey, previousSpecial:upper())
+
+		if HasPedGotWeaponComponent(playerPed, weapon.hash, oldClip) then
+			RemoveWeaponComponentFromPed(playerPed, weapon.hash, oldClip)
+		end
+	end
+
+	if specialAmmo then
+		local specialClip = ('%s_%s'):format(clipComponentKey, specialAmmo:upper())
+
+		if DoesWeaponTakeWeaponComponent(weapon.hash, specialClip) and not HasPedGotWeaponComponent(playerPed, weapon.hash, specialClip) then
+			GiveWeaponComponentToPed(playerPed, weapon.hash, specialClip)
+		end
+	end
+
+	weapon.metadata.specialAmmo = specialAmmo
+end
+
+local AmmoPoolTemplate = {
+	pistol = { clip = 0, reserve = 0, maxReserve = 250 },
+	rifle = { clip = 0, reserve = 0, maxReserve = 350 },
+	shotgun = { clip = 0, reserve = 0, maxReserve = 125 },
+	smg = { clip = 0, reserve = 0, maxReserve = 350 },
+	sniper = { clip = 0, reserve = 0, maxReserve = 150 },
+}
+
+local function sanitiseAmmoPools(pools)
+	local data = {}
+
+	for key, defaults in pairs(AmmoPoolTemplate) do
+		local state = pools and pools[key] or defaults
+		local maxReserve = math.max(0, tonumber(state?.maxReserve) or tonumber(defaults?.maxReserve) or 0)
+		data[key] = {
+			clip = math.max(0, tonumber(state?.clip) or 0),
+			reserve = math.min(math.max(0, tonumber(state?.reserve) or 0), maxReserve),
+			maxReserve = maxReserve,
+		}
+	end
+
+	return data
+end
+
+local function getWeaponAmmoPoolKey(weapon)
+	local weaponHash = weapon?.hash or weapon?.name and joaat(weapon.name)
+
+	if not weaponHash or weaponHash == `WEAPON_UNARMED` then return end
+
+	local weaponGroup = GetWeapontypeGroup(weaponHash)
+
+	if weaponGroup == `GROUP_PISTOL` or weaponGroup == `GROUP_STUNGUN` then
+		return 'pistol'
+	elseif weaponGroup == `GROUP_SMG` then
+		return 'smg'
+	elseif weaponGroup == `GROUP_SHOTGUN` then
+		return 'shotgun'
+	elseif weaponGroup == `GROUP_SNIPER` then
+		return 'sniper'
+	elseif weaponGroup == `GROUP_RIFLE` or weaponGroup == `GROUP_MG` then
+		return 'rifle'
+	end
+end
+
+local function getWeaponAmmoPoolState(weapon)
+	local key = getWeaponAmmoPoolKey(weapon)
+	local pools = PlayerData?.ammoPools
+
+	if not key then return end
+
+	pools = sanitiseAmmoPools(pools)
+	PlayerData.ammoPools = pools
+
+	return key, pools[key]
+end
+
+local function getWeaponHash(weapon)
+	if type(weapon) == 'number' then
+		return weapon
+	elseif type(weapon) == 'string' then
+		return joaat(weapon)
+	elseif type(weapon) == 'table' then
+		return weapon.hash or (weapon.name and joaat(weapon.name)) or (weapon.weapon and joaat(weapon.weapon))
+	end
+end
+
+local function getAmmoReserveData(weapon)
+	local targetWeapon = weapon or currentWeapon
+
+	if type(targetWeapon) == 'number' then
+		targetWeapon = { hash = targetWeapon }
+	elseif type(targetWeapon) == 'string' then
+		targetWeapon = { name = targetWeapon }
+	end
+
+	local poolKey, ammoState = getWeaponAmmoPoolState(targetWeapon)
+
+	if not poolKey or not ammoState then
+		return nil
+	end
+
+	local clip = ammoState.clip or 0
+	local reserve = ammoState.reserve or 0
+	local targetHash = getWeaponHash(targetWeapon)
+	local currentHash = currentWeapon?.hash or GetSelectedPedWeapon(playerPed)
+
+	-- Keep reserve cache-first. Ammo boxes update PlayerData.ammoPools before the
+	-- ped ammo natives necessarily reflect the new reserve value.
+	-- For the currently equipped weapon we only refresh the live clip count here.
+	if targetHash and currentHash == targetHash then
+		local _, clipAmmo = GetAmmoInClip(playerPed, targetHash)
+		clip = clipAmmo or 0
+	end
+
+	return {
+		pool = poolKey,
+		clip = clip,
+		reserve = reserve,
+		maxReserve = ammoState.maxReserve or 0,
+		total = clip + reserve,
+	}
+end
+
+exports('getAmmoReserveData', getAmmoReserveData)
+
+exports('getAmmoReserve', function(weapon)
+	local data = getAmmoReserveData(weapon)
+	return data and data.reserve or 0
+end)
+
+local function setCurrentWeaponAmmoFromPool(weapon, ammoState)
+	if not weapon?.metadata or not ammoState then return end
+
+	local clipAmmo = tonumber(ammoState.clip) or tonumber(weapon.metadata.ammo) or 0
+	local reserveAmmo = math.max(0, tonumber(ammoState.reserve) or 0)
+
+	if currentWeapon and currentWeapon.hash == weapon.hash then
+		local _, liveClipAmmo = GetAmmoInClip(playerPed, weapon.hash)
+		clipAmmo = liveClipAmmo or clipAmmo
+	end
+
+	clipAmmo = math.max(0, tonumber(clipAmmo) or 0)
+
+	weapon.metadata.ammo = clipAmmo
+	weapon.metadata.loadedMagazine = nil
+	weapon.metadata.specialAmmo = nil
+	weapon.metadata.reserve = reserveAmmo
+	weapon.metadata.maxReserve = ammoState.maxReserve
+
+	SetPedAmmo(playerPed, weapon.hash, clipAmmo + reserveAmmo)
+	SetAmmoInClip(playerPed, weapon.hash, clipAmmo)
+
+	if shared.ammodebug then
+		local pedTotalAmmo = GetAmmoInPedWeapon(playerPed, weapon.hash) or 0
+		local _, pedClipAmmo = GetAmmoInClip(playerPed, weapon.hash)
+		print(('[ox_inventory DEBUG] setCurrentWeaponAmmoFromPool | weapon: %s | clip: %s | reserve: %s | pedClip: %s | pedTotal: %s'):format(
+			tostring(weapon.hash),
+			tostring(clipAmmo),
+			tostring(reserveAmmo),
+			tostring(pedClipAmmo or 0),
+			tostring(pedTotalAmmo)
+		))
+	end
+end
+
+local function syncCurrentWeaponReserveFromPoolCache(weapon)
+	if not weapon?.metadata then return end
+
+	local _, ammoState = getWeaponAmmoPoolState(weapon)
+
+	if not ammoState then
+		return
+	end
+
+	local clipAmmo = ammoState.clip or weapon.metadata.ammo or 0
+
+	if currentWeapon and currentWeapon.hash == weapon.hash then
+		local _, liveClipAmmo = GetAmmoInClip(playerPed, weapon.hash)
+		clipAmmo = liveClipAmmo or clipAmmo
+	end
+
+	weapon.metadata.ammo = clipAmmo
+	weapon.metadata.reserve = ammoState.reserve or 0
+	weapon.metadata.maxReserve = ammoState.maxReserve or 0
+
+	return ammoState
+end
+
+local function calculateReserveFromPoolDelta(previousClip, previousReserve, currentClip)
+	previousClip = math.max(0, tonumber(previousClip) or 0)
+	previousReserve = math.max(0, tonumber(previousReserve) or 0)
+	currentClip = math.max(0, tonumber(currentClip) or 0)
+
+	if currentClip > previousClip then
+		return math.max(0, previousReserve - (currentClip - previousClip))
+	end
+
+	return previousReserve
+end
+
+local function applyClipChangeToAmmoPool(weapon, previousClip, previousReserve, currentClip)
+	if not weapon?.metadata then return end
+
+	local poolKey, ammoState = getWeaponAmmoPoolState(weapon)
+
+	if not poolKey or not ammoState then return end
+
+	previousClip = math.max(0, tonumber(previousClip) or 0)
+	previousReserve = math.max(0, tonumber(previousReserve) or 0)
+	currentClip = math.max(0, tonumber(currentClip) or 0)
+
+	local updatedReserve = calculateReserveFromPoolDelta(previousClip, previousReserve, currentClip)
+	ammoState.clip = currentClip
+	ammoState.reserve = math.min(ammoState.maxReserve, math.max(0, updatedReserve))
+
+	weapon.metadata.ammo = currentClip
+	weapon.metadata.reserve = ammoState.reserve
+	weapon.metadata.loadedMagazine = nil
+	weapon.metadata.specialAmmo = nil
+
+	TriggerServerEvent('ox_inventory:updateWeapon', 'ammo', currentClip)
+	TriggerServerEvent('ox_inventory:updateAmmoPool', poolKey, currentClip, ammoState.reserve, weapon.slot)
+
+	return ammoState
+end
+
+local pendingReloadSync = {
+	active = false,
+	weaponHash = nil,
+	startClip = 0,
+	startReserve = 0,
+	expiresAt = 0,
+	requestedAt = 0,
+}
+
+local function clearPendingReloadSync()
+	pendingReloadSync.active = false
+	pendingReloadSync.weaponHash = nil
+	pendingReloadSync.startClip = 0
+	pendingReloadSync.startReserve = 0
+	pendingReloadSync.expiresAt = 0
+	pendingReloadSync.requestedAt = 0
+end
+
+local function beginPendingReloadSync(weapon, ammoState)
+	if not weapon?.hash then return end
+
+	local _, liveClip = GetAmmoInClip(playerPed, weapon.hash)
+	liveClip = math.max(0, tonumber(liveClip) or 0)
+
+	pendingReloadSync.active = true
+	pendingReloadSync.weaponHash = weapon.hash
+	pendingReloadSync.startClip = liveClip
+	pendingReloadSync.startReserve = tonumber(ammoState and ammoState.reserve) or tonumber(weapon.metadata?.reserve) or 0
+	pendingReloadSync.expiresAt = GetGameTimer() + 4000
+	pendingReloadSync.requestedAt = GetGameTimer()
+
+	weapon.metadata.ammo = liveClip
+end
+
+local function completePendingReloadSync(weapon, currentClip)
+	if not pendingReloadSync.active or not weapon?.hash or weapon.hash ~= pendingReloadSync.weaponHash then
+		return nil
+	end
+
+	local ammoState = applyClipChangeToAmmoPool(weapon, pendingReloadSync.startClip, pendingReloadSync.startReserve, currentClip)
+	clearPendingReloadSync()
+	return ammoState
+end
+
+CreateThread(function()
+	while true do
+		Wait(25)
+
+		if pendingReloadSync.active then
+			if not currentWeapon or currentWeapon.hash ~= pendingReloadSync.weaponHash or GetGameTimer() > pendingReloadSync.expiresAt then
+				clearPendingReloadSync()
+			else
+				local _, currentClip = GetAmmoInClip(playerPed, currentWeapon.hash)
+				currentClip = currentClip or 0
+
+				if currentClip > pendingReloadSync.startClip then
+					local previousClip = pendingReloadSync.startClip
+					local ammoState = completePendingReloadSync(currentWeapon, currentClip)
+
+					if shared.ammodebug then
+						print(('[ox_inventory DEBUG] reload sync applied | weapon: %s | clip: %s -> %s | reserve: %s'):format(
+							tostring(currentWeapon.hash),
+							tostring(previousClip),
+							tostring(currentClip),
+							tostring(ammoState and ammoState.reserve or currentWeapon.metadata?.reserve or 0)
+						))
+					end
+				end
+			end
+		else
+			Wait(100)
+		end
+	end
+end)
+
+local function syncCurrentWeaponAmmoPool(force)
+	if not currentWeapon?.ammo or not currentWeapon?.metadata then return end
+
+	local poolKey, ammoState = getWeaponAmmoPoolState(currentWeapon)
+
+	if not poolKey or not ammoState then return end
+
+	local _, clipAmmo = GetAmmoInClip(playerPed, currentWeapon.hash)
+	local previousClip = tonumber(ammoState.clip) or tonumber(currentWeapon.metadata.ammo) or 0
+	local previousReserve = tonumber(ammoState.reserve) or tonumber(currentWeapon.metadata.reserve) or 0
+	local reserveAmmo = calculateReserveFromPoolDelta(previousClip, previousReserve, clipAmmo)
+
+	if not force and ammoState.clip == clipAmmo and ammoState.reserve == reserveAmmo then
+		return
+	end
+
+	ammoState.clip = clipAmmo
+	ammoState.reserve = math.min(ammoState.maxReserve, math.max(0, reserveAmmo))
+	currentWeapon.metadata.ammo = clipAmmo
+	currentWeapon.metadata.reserve = ammoState.reserve
+	currentWeapon.metadata.loadedMagazine = nil
+	currentWeapon.metadata.specialAmmo = nil
+
+	TriggerServerEvent('ox_inventory:updateWeapon', 'ammo', clipAmmo)
+	TriggerServerEvent('ox_inventory:updateAmmoPool', poolKey, clipAmmo, ammoState.reserve, currentWeapon.slot)
+end
+
+client.syncCurrentWeaponAmmoPool = syncCurrentWeaponAmmoPool
+
+local function ammoDebug(...)
+	if not shared.ammodebug then return end
+
+	local parts = table.pack(...)
+	for i = 1, parts.n do
+		parts[i] = tostring(parts[i])
+	end
+
+	lib.print.info('[ammo-debug]', table.unpack(parts, 1, parts.n))
+end
+
 -- forward declarations for cross-calls
+local useItem
 local useSlot
+
+local function addAmmoReserveFromItem(item, data, noAnim)
+	if not canUseItem(false) then return end
+
+	local ammoPools = sanitiseAmmoPools(PlayerData.ammoPools)
+	local ammoState = ammoPools[data.ammoPool]
+	ammoDebug('attempting ammo reserve use', item.name, 'slot', item.slot, 'pool', data.ammoPool, 'amount', data.ammoAmount,
+		'currentState', json.encode(ammoState))
+
+	if ammoState and ammoState.reserve >= ammoState.maxReserve then
+		return lib.notify({ type = 'error', description = ('Your %s reserve is already full.'):format(data.ammoPool) })
+	end
+
+	local useData = {
+		name = item.name,
+		label = item.label,
+		slot = item.slot,
+		close = data.close,
+		consume = data.consume,
+		weapon = data.weapon,
+		stack = data.stack,
+		client = data.client,
+		server = data.server,
+	}
+
+	useItem(useData, function(result)
+		ammoDebug('useItem callback for ammo reserve item', item.name, 'result', result and 'success' or 'failed')
+		if not result then return end
+	end, noAnim, true)
+end
+
+RegisterNetEvent('ox_inventory:updateAmmoReservePool', function(poolKey, ammoState, amount)
+	if not poolKey or not ammoState then return end
+
+	PlayerData.ammoPools = sanitiseAmmoPools(PlayerData.ammoPools)
+	PlayerData.ammoPools[poolKey] = ammoState
+	ammoDebug('received ammo reserve update from server', 'pool', poolKey, 'amount', amount, 'state', json.encode(ammoState))
+
+	if shared.ammodebug then
+		print(('[ox_inventory DEBUG] updateAmmoReservePool | pool: %s | amount: %s | clip: %s | reserve: %s'):format(
+			tostring(poolKey),
+			tostring(amount or 0),
+			tostring(ammoState.clip or 0),
+			tostring(ammoState.reserve or 0)
+		))
+	end
+
+	lib.notify({
+		type = 'success',
+		description = ('Added %s reserve ammo to %s.'):format(math.groupdigits(amount or 0), poolKey)
+	})
+
+	if currentWeapon and getWeaponAmmoPoolKey(currentWeapon) == poolKey then
+		setCurrentWeaponAmmoFromPool(currentWeapon, ammoState)
+
+		if shared.ammodebug then
+			local _, clipAmmo = GetAmmoInClip(playerPed, currentWeapon.hash)
+			local totalAmmo = GetAmmoInPedWeapon(playerPed, currentWeapon.hash) or 0
+			print(('[ox_inventory DEBUG] synced current weapon from ammo pool | weapon: %s | clip: %s | reserve: %s | pedTotalAmmo: %s'):format(
+				tostring(currentWeapon.hash),
+				tostring(clipAmmo or 0),
+				tostring(ammoState.reserve or 0),
+				tostring(totalAmmo)
+			))
+		end
+	end
+end)
 
 ---@param data table
 ---@param cb fun(response: SlotWithItem | false)?
 ---@param noAnim? boolean
 ---@param fromUseSlot? boolean
-local function useItem(data, cb, noAnim, fromUseSlot)
+function useItem(data, cb, noAnim, fromUseSlot)
 	local inventoryId = data.inventory
 	local slotData
 
@@ -666,6 +2110,18 @@ function useSlot(slot, noAnim)
 	local data = Items[item.name]
 	if not data then return end
 
+	if data.ammoPool and data.ammoAmount then
+		return addAmmoReserveFromItem(item, data, noAnim)
+	end
+
+	if data.ammo then
+		if not canUseItem(false) then return end
+		return lib.notify({
+			type = 'error',
+			description = 'Loose ammo can no longer be loaded directly. Use an ammo box to add reserve ammo.'
+		})
+	end
+
 	if canUseItem(data.ammo and true) then
 		if data.component and not currentWeapon then
 			return lib.notify({ id = 'weapon_hand_required', type = 'error', description = locale('weapon_hand_required') })
@@ -688,22 +2144,7 @@ function useSlot(slot, noAnim)
 
 		data.slot = slot
 
-		if item.metadata.container then
-			return client.openInventory('container', item.slot)
-		elseif data.client then
-			if invOpen and data.close then client.closeInventory() end
-
-			if data.export then
-				return data.export(data, { name = item.name, slot = item.slot, metadata = item.metadata })
-			elseif data.client.event then -- re-add it, so I don't need to deal with morons taking screenshots of errors when using trigger event
-				return TriggerEvent(data.client.event, data,
-					{ name = item.name, slot = item.slot, metadata = item.metadata })
-			end
-		end
-
-		if data.effect then
-			data:effect({ name = item.name, slot = item.slot, metadata = item.metadata })
-		elseif data.weapon then
+		if data.weapon then
 			if EnableWeaponWheel or not plyState.canUseWeapons then return end
 
 			if IsCinematicCamRendering() then SetCinematicModeActive(false) end
@@ -727,115 +2168,43 @@ function useSlot(slot, noAnim)
 
 			RemoveWeaponFromPed(cache.ped, data.hash)
 
-			useItem(data, function(result)
+			return useItem(data, function(result)
 				if result then
 					if invOpen then client.closeInventory() end -- close inventory once weapon is equipped
 					local sleep
 					currentWeapon, sleep = Weapon.Equip(item, data, noAnim)
+					local _, ammoState = getWeaponAmmoPoolState(currentWeapon)
+
+					if ammoState then
+						setCurrentWeaponAmmoFromPool(currentWeapon, ammoState)
+					end
 
 					if sleep then Wait(sleep) end
 				end
 			end, noAnim, true)
+		elseif item.metadata.container then
+			return client.openInventory('container', item.slot)
+		elseif data.client then
+			if invOpen and data.close then client.closeInventory() end
+
+			if data.export then
+				return data.export(data, { name = item.name, slot = item.slot, metadata = item.metadata })
+			elseif data.client.event then -- re-add it, so I don't need to deal with morons taking screenshots of errors when using trigger event
+				return TriggerEvent(data.client.event, data,
+					{ name = item.name, slot = item.slot, metadata = item.metadata })
+			end
+		end
+
+		if data.effect then
+			data:effect({ name = item.name, slot = item.slot, metadata = item.metadata })
 		elseif currentWeapon then
 			if data.ammo then
-				if EnableWeaponWheel or currentWeapon.metadata.durability <= 0 then return end
-
-				local clipSize = GetMaxAmmoInClip(playerPed, currentWeapon.hash, true)
-				local currentAmmo = GetAmmoInPedWeapon(playerPed, currentWeapon.hash)
-				local _, maxAmmo = GetMaxAmmo(playerPed, currentWeapon.hash)
-
-				if maxAmmo < clipSize then clipSize = maxAmmo end
-
-				if currentAmmo == clipSize then return end
-
-				useItem(data, function(resp)
-					if not resp or resp.name ~= currentWeapon?.ammo then return end
-
-					if currentWeapon.metadata.specialAmmo ~= resp.metadata.type and type(currentWeapon.metadata.specialAmmo) == 'string' then
-						local clipComponentKey = ('%s_CLIP'):format(Items[currentWeapon.name].model:gsub('WEAPON_',
-							'COMPONENT_'))
-						local specialClip = ('%s_%s'):format(clipComponentKey,
-							(resp.metadata.type or currentWeapon.metadata.specialAmmo):upper())
-
-						if type(resp.metadata.type) == 'string' then
-							if not HasPedGotWeaponComponent(playerPed, currentWeapon.hash, specialClip) then
-								if not DoesWeaponTakeWeaponComponent(currentWeapon.hash, specialClip) then
-									warn('cannot use clip with this weapon')
-									return
-								end
-
-								local defaultClip = ('%s_01'):format(clipComponentKey)
-
-								if not HasPedGotWeaponComponent(playerPed, currentWeapon.hash, defaultClip) then
-									warn('cannot use clip with currently equipped clip')
-									return
-								end
-
-								if currentAmmo > 0 then
-									warn('cannot mix special ammo with base ammo')
-									return
-								end
-
-								currentWeapon.metadata.specialAmmo = resp.metadata.type
-
-								GiveWeaponComponentToPed(playerPed, currentWeapon.hash, specialClip)
-							end
-						elseif HasPedGotWeaponComponent(playerPed, currentWeapon.hash, specialClip) then
-							if currentAmmo > 0 then
-								warn('cannot mix special ammo with base ammo')
-								return
-							end
-
-							currentWeapon.metadata.specialAmmo = nil
-
-							RemoveWeaponComponentFromPed(playerPed, currentWeapon.hash, specialClip)
-						end
-					end
-
-					if maxAmmo > clipSize then
-						clipSize = GetMaxAmmoInClip(playerPed, currentWeapon.hash, true)
-					end
-
-					currentAmmo = GetAmmoInPedWeapon(playerPed, currentWeapon.hash)
-					local missingAmmo = clipSize - currentAmmo
-					local addAmmo = resp.count > missingAmmo and missingAmmo or resp.count
-					local newAmmo = currentAmmo + addAmmo
-
-					if newAmmo == currentAmmo then return end
-
-					AddAmmoToPed(playerPed, currentWeapon.hash, addAmmo)
-
-					if cache.vehicle then
-						if cache.seat > -1 or IsVehicleStopped(cache.vehicle) then
-							TaskReloadWeapon(playerPed, true)
-						else
-							-- This is a hacky solution for forcing ammo to properly load into the
-							-- weapon clip while driving; without it, ammo will be added but won't
-							-- load until the player stops doing anything. i.e. if you keep shooting,
-							-- the weapon will not reload until the clip empties.
-							-- And yes - for some reason RefillAmmoInstantly needs to run in a loop.
-							lib.waitFor(function()
-								RefillAmmoInstantly(playerPed)
-
-								local _, ammo = GetAmmoInClip(playerPed, currentWeapon.hash)
-								return ammo == newAmmo or nil
-							end)
-						end
-					else
-						Wait(100)
-						MakePedReload(playerPed)
-
-						SetTimeout(100, function()
-							while IsPedReloading(playerPed) do
-								DisableControlAction(0, 22, true)
-								Wait(0)
-							end
-						end)
-					end
-
-					lib.callback.await('ox_inventory:updateWeapon', false, 'load', newAmmo, false,
-						currentWeapon.metadata.specialAmmo)
-				end, nil, true)
+				return lib.notify({
+					type = 'error',
+					description = 'Loose ammo can no longer be loaded directly. Use an ammo box to add reserve ammo.'
+				})
+			elseif data.magazine then
+				return lib.notify({ type = 'error', description = 'Magazines are disabled while the ammo pool system is active.' })
 			elseif data.component then
 				local components = data.client.component
 
@@ -890,7 +2259,7 @@ function useSlot(slot, noAnim)
 				print("THIS")
 				return lib.notify({ id = 'cannot_perform', type = 'error', description = locale('cannot_perform') })
 			end
-		elseif not data.ammo and not data.component then
+		elseif not data.ammo and not data.component and not data.magazine then
 			useItem(data, nil, nil, true)
 		end
 	end
@@ -918,6 +2287,38 @@ local function openNearbyInventory() client.openInventory('player') end
 
 exports('openNearbyInventory', openNearbyInventory)
 
+local function refreshInventoryDisplay()
+	SendNUIMessage({
+		action = 'setupInventory',
+		data = {
+			leftInventory = {
+				id = cache.serverId,
+				type = 'player',
+				slots = shared.playerslots,
+				maxWeight = shared.playerweight,
+				weight = PlayerData.weight,
+				items = PlayerData.inventory,
+				groups = PlayerData.groups,
+				backpack = playerBackpack,
+				utility = Utility.enabled and applyDynamicUtilityConfig(Utility.collect(PlayerData.inventory)) or nil,
+				utilityConfig = Utility.enabled and {
+					quickSlotLabels = buildUtilityHotkeyLabels(),
+					tabHotkeys = buildInventoryTabHotkeys(),
+				} or nil,
+			},
+			rightInventory = currentInventory
+		}
+	})
+end
+
+local function toggleWeaponMagazinePanel(slot)
+	return lib.notify({ type = 'error', description = 'Magazine inventory has been removed. Weapons now use ammo pools only.' })
+end
+
+RegisterNetEvent('ox_inventory:openWeaponMagazineButton', function(slot)
+	lib.notify({ type = 'error', description = 'Magazine inventory has been removed. Weapons now use ammo pools only.' })
+end)
+
 local currentInstance
 local playerCoords
 local Shops = require 'modules.shops.client'
@@ -942,6 +2343,90 @@ end
 if not Utils or not Weapon or not Items or not Inventory then return end
 
 local invHotkeys = false
+local utilityHotbarSlots = Utility.config.hotbarSlots or { 1, 2, 3, 4, 5 }
+local utilityHotkeys = Utility.config.hotkeys or {}
+local utilitySlotKeybinds = {}
+local inventoryTabPrevKeybind
+local inventoryTabNextKeybind
+
+getKeybindLabel = function(keybind, fallback)
+	local key = keybind and keybind.currentKey or fallback or ''
+
+	if type(key) ~= 'string' or key == '' then
+		return fallback or ''
+	end
+
+	key = key:gsub('^t_', ''):gsub('^b_', '')
+	return key:upper()
+end
+
+buildUtilityHotkeyLabels = function()
+	local hotkeys = {}
+
+	for i = 1, #utilityHotbarSlots do
+		hotkeys[i] = getKeybindLabel(utilitySlotKeybinds[i], tostring(i))
+	end
+
+	return hotkeys
+end
+
+buildInventoryTabHotkeys = function()
+	return {
+		inventory = getKeybindLabel(inventoryTabPrevKeybind, 'Q'),
+		utility = getKeybindLabel(inventoryTabNextKeybind, 'E'),
+	}
+end
+
+applyDynamicUtilityConfig = function(state)
+	if not state or not state.config then return state end
+
+	state.config.quickSlotLabels = buildUtilityHotkeyLabels()
+	state.config.tabHotkeys = buildInventoryTabHotkeys()
+
+	return state
+end
+
+local function getUtilityInventorySlotByIndex(index)
+	local utilitySlot = utilityHotbarSlots[index]
+
+	if type(utilitySlot) ~= 'number' or not Utility.getReservedSlot then
+		return nil, utilitySlot
+	end
+
+	return Utility.getReservedSlot(utilitySlot), utilitySlot
+end
+
+local function buildHotbarPayload()
+	local items = {}
+	local hotkeys = {}
+	local inventory = PlayerData and PlayerData.inventory or {}
+	local currentHotkeys = buildUtilityHotkeyLabels()
+
+	for i = 1, #utilityHotbarSlots do
+		local reservedSlot = getUtilityInventorySlotByIndex(i)
+		local slotData = reservedSlot and inventory[reservedSlot]
+
+		items[i] = slotData and slotData.name and slotData or { slot = reservedSlot or i }
+		hotkeys[i] = currentHotkeys[i] or tostring(i)
+	end
+
+	return {
+		open = true,
+		items = items,
+		hotkeys = hotkeys,
+	}
+end
+
+local function cycleInventoryTab(direction)
+	if not invOpen then return end
+
+	SendNUIMessage({
+		action = 'cycleInventoryTab',
+		data = {
+			direction = direction,
+		}
+	})
+end
 
 ---@type function?
 local function registerCommands()
@@ -1047,12 +2532,44 @@ local function registerCommands()
 
 			if currentWeapon.ammo then
 				if currentWeapon.metadata.durability > 0 then
-					local slotId = Inventory.GetSlotIdWithItem(currentWeapon.ammo,
-						{ type = currentWeapon.metadata.specialAmmo }, false)
+					if currentWeapon.timer and currentWeapon.timer > GetGameTimer() then
+						if shared.debug then
+							print(('[ox_inventory DEBUG] reload blocked during post-shot timer | weapon: %s | timerRemaining: %s'):format(
+								tostring(currentWeapon.hash),
+								tostring(currentWeapon.timer - GetGameTimer())
+							))
+						end
 
-					if slotId then
-						useSlot(slotId)
+						return
 					end
+
+					local ammoState = syncCurrentWeaponReserveFromPoolCache(currentWeapon)
+					local reserveAmmo = ammoState and (ammoState.reserve or 0) or (currentWeapon.metadata.reserve or 0)
+					local pedTotalAmmoBeforeReload = GetAmmoInPedWeapon(playerPed, currentWeapon.hash) or 0
+
+					if reserveAmmo <= 0 then
+						return lib.notify({
+							id = 'no_ammo',
+							type = 'error',
+							description = locale('no_ammo')
+						})
+					end
+
+					setCurrentWeaponAmmoFromPool(currentWeapon, ammoState)
+					local pedTotalAmmoAfterPoolSync = GetAmmoInPedWeapon(playerPed, currentWeapon.hash) or 0
+
+					if shared.ammodebug then
+						print(('[ox_inventory DEBUG] reload requested from ammo pool | weapon: %s | clip: %s | reserve: %s | pedTotalBefore: %s | pedTotalAfter: %s'):format(
+							tostring(currentWeapon.hash),
+							tostring(ammoState.clip or currentWeapon.metadata.ammo or 0),
+							tostring(ammoState.reserve or 0),
+							tostring(pedTotalAmmoBeforeReload),
+							tostring(pedTotalAmmoAfterPoolSync)
+						))
+					end
+
+					beginPendingReloadSync(currentWeapon, ammoState)
+					MakePedReload(playerPed)
 				else
 					lib.notify({
 						id = 'no_durability',
@@ -1071,18 +2588,45 @@ local function registerCommands()
 		defaultKey = client.keys[3],
 		onPressed = function()
 			if EnableWeaponWheel or IsNuiFocused() or lib.progressActive() then return end
-			SendNUIMessage({ action = 'toggleHotbar' })
+			SendNUIMessage({ action = 'toggleHotbar', data = buildHotbarPayload() })
+		end
+	})
+
+	inventoryTabPrevKeybind = lib.addKeybind({
+		name = 'inventorytabprev',
+		description = locale('prev_inventory_tab'),
+		defaultKey = 'q',
+		onPressed = function()
+			if lib.progressActive() then return end
+			cycleInventoryTab(-1)
+		end
+	})
+
+	inventoryTabNextKeybind = lib.addKeybind({
+		name = 'inventorytabnext',
+		description = locale('next_inventory_tab'),
+		defaultKey = 'e',
+		onPressed = function()
+			if lib.progressActive() then return end
+			cycleInventoryTab(1)
 		end
 	})
 
 	for i = 1, 5 do
-		lib.addKeybind({
+		local _, utilitySlot = getUtilityInventorySlotByIndex(i)
+
+		utilitySlotKeybinds[i] = lib.addKeybind({
 			name = ('hotkey%s'):format(i),
-			description = locale('use_hotbar', i),
-			defaultKey = tostring(i),
+			description = locale('use_quickslot', i),
+			defaultKey = utilityHotkeys[utilitySlot] or tostring(i),
 			onPressed = function()
 				if invOpen or EnableWeaponWheel or not invHotkeys or IsNuiFocused() then return end
-				useSlot(i)
+
+				local reservedSlot = getUtilityInventorySlotByIndex(i)
+
+				if reservedSlot then
+					useSlot(reservedSlot)
+				end
 			end
 		})
 	end
@@ -1174,14 +2718,24 @@ local function updateInventory(data, weight)
 	}
 
 	if Utility.enabled and playerUtilityChanged then
-		payload.leftUtility = Utility.collect(PlayerData.inventory)
+		payload.leftUtility = applyDynamicUtilityConfig(Utility.collect(PlayerData.inventory))
 		Utility.refreshArmorFromInventory(PlayerData.inventory)
 		Utility.refreshBackpackFromInventory(PlayerData.inventory)
+		Utility.refreshParachuteFromInventory(PlayerData.inventory)
+	end
+
+	-- Recalculate when base weight changes or any utility slot changed (backpack, armour, phone, weapons, parachute, etc.)
+	local shouldUpdateWeight = (weight ~= PlayerData.weight) or (Utility.enabled and playerUtilityChanged)
+
+	if shouldUpdateWeight then
+		applyUtilityWeight(weight, PlayerData.inventory)
+		payload.weight = {
+			inventoryId = 'player',
+			weight = PlayerData.weight,
+		}
 	end
 
 	SendNUIMessage({ action = 'refreshSlots', data = payload })
-
-	if weight ~= PlayerData.weight then client.setPlayerData('weight', weight) end
 
 	for itemName, count in pairs(itemCount) do
 		local item = Items(itemName)
@@ -1290,37 +2844,8 @@ local function onEnterDrop(point)
 				local coords = entry.coords or point.coords
 				entity = CreateObject(model, coords.x, coords.y, coords.z, true, true, true)
 				SetEntityAsMissionEntity(entity, true, true)
-				print("ADDING TARGET to entity:", entity)
-				print("invID:", point.invId)
-				local targetEntity = CreateObject(`prop_paper_bag_small`, coords.x, coords.y, coords.z, false, true, true)
-				SetEntityAsMissionEntity(targetEntity, true, true)
-				SetEntityAlpha(targetEntity, 0)
-				SetEntityCollision(targetEntity, true, true)
-
-				exports.ox_target:addLocalEntity(targetEntity, {
-					{
-						name = 'pickup_drop',
-						icon = 'fa-solid fa-box-open',
-						label = 'Open Drop',
-						distance = 3.5,
-						onSelect = function()
-							exports.ox_inventory:openInventory('drop', point.invId)
-						end
-					}
-				})
-
-				SetEntityCoordsNoOffset(entity, coords.x, coords.y, coords.z, false, false, false)
-				FreezeEntityPosition(entity, true)
-				SetEntityCollision(entity, true, true)
-
-				AttachEntityToEntity(
-					entity,
-					targetEntity,
-					0,
-					0.0, 0.0, 0.02,
-					0.0, 0.0, 0.0,
-					false, false, false, false, 2, true
-				)
+				placeDropEntity(entity, coords, true)
+				addDropTarget(entity, point.invId)
 
 				point.entities[uid] = entity
 			end
@@ -1338,9 +2863,8 @@ local function onEnterDrop(point)
 
 		SetModelAsNoLongerNeeded(model)
 
-		SetEntityCoordsNoOffset(entity, point.coords.x, point.coords.y, point.coords.z, false, false, false)
-		FreezeEntityPosition(entity, true)
-		SetEntityCollision(entity, true, true)
+		placeDropEntity(entity, point.coords, true)
+		addDropTarget(entity, point.invId)
 
 		point.entity = entity
 	end
@@ -1365,6 +2889,10 @@ local function onExitDrop(point)
 end
 
 local function createDrop(dropId, data)
+	throwDebug('createDrop', 'dropId', dropId, 'coords', data and data.coords and json.encode(data.coords) or 'nil',
+		'instance', data and data.instance or 'nil', 'model', data and (data.model or data.modelp) or 'nil',
+		'hasPropObjects', data and data.hasPropObjects and 'true' or 'false')
+
 	local point = lib.points.new({
 		coords = data.coords,
 		distance = 16,
@@ -1548,9 +3076,7 @@ local function spawnDropProp(dropId, uniqueId, model, coords)
 
 	SetEntityHeading(entity, math.random(0, 359))
 	SetModelAsNoLongerNeeded(model)
-	SetEntityCoordsNoOffset(entity, coords.x, coords.y, coords.z, false, false, false)
-	FreezeEntityPosition(entity, true)
-	SetEntityCollision(entity, true, true)
+	placeDropEntity(entity, coords, true)
 
 	local netId = NetworkGetNetworkIdFromEntity(entity)
 	local record = {
@@ -1583,6 +3109,9 @@ local function spawnDropProp(dropId, uniqueId, model, coords)
 end
 
 RegisterNetEvent('ox_inventory:createDrop', function(dropId, data, owner, slot)
+	throwDebug('createDrop:event', 'dropId', dropId, 'owner', owner, 'slot', slot, 'coords',
+		data and data.coords and json.encode(data.coords) or 'nil')
+
 	if client.drops then
 		createDrop(dropId, data)
 	end
@@ -1758,6 +3287,7 @@ RegisterNetEvent('ox_inventory:setPlayerInventory', function(currentDrops, inven
 	PlayerData.id = cache.playerId
 	PlayerData.source = cache.serverId
 	PlayerData.maxWeight = shared.playerweight
+	PlayerData.ammoPools = sanitiseAmmoPools(PlayerData.ammoPools)
 
 	setmetatable(PlayerData, {
 		__index = function(self, key)
@@ -1789,6 +3319,7 @@ RegisterNetEvent('ox_inventory:setPlayerInventory', function(currentDrops, inven
 			count = 0,
 			description = v.description,
 			buttons = buttons,
+			weapon = v.weapon,
 			ammoName = v.ammoname,
 			image = v.client?.image,
 			rarity = v.rarity
@@ -1818,7 +3349,7 @@ RegisterNetEvent('ox_inventory:setPlayerInventory', function(currentDrops, inven
 	end
 
 	client.setPlayerData('inventory', inventory)
-	client.setPlayerData('weight', weight)
+	applyUtilityWeight(weight, inventory)
 	currentWeapon = nil
 	Weapon.ClearAll()
 
@@ -2012,9 +3543,12 @@ RegisterNetEvent('ox_inventory:setPlayerInventory', function(currentDrops, inven
 			end
 		end
 
-		if client.parachute and GetPedParachuteState(playerPed) ~= -1 then
-			Utils.DeleteEntity(client.parachute[1])
-			client.parachute = false
+		local parachuteState = GetPedParachuteState(playerPed)
+		if client.parachute and parachuteState and parachuteState > 0 then
+			if not (Utility and Utility.handleParachuteDeployment and Utility.handleParachuteDeployment()) then
+				Utils.DeleteEntity(client.parachute[1])
+				client.parachute = false
+			end
 		end
 
 		if EnableWeaponWheel then return end
@@ -2022,12 +3556,17 @@ RegisterNetEvent('ox_inventory:setPlayerInventory', function(currentDrops, inven
 		local weaponHash = GetSelectedPedWeapon(playerPed)
 
 		if currentWeapon then
-			if weaponHash ~= currentWeapon.hash and currentWeapon.timer then
+			if currentWeapon.ammo then
+				SetWeaponsNoAutoreload(true)
+			end
+
+			if weaponHash ~= currentWeapon.hash and currentWeapon.timer ~= nil then
 				local weaponCount = Items[currentWeapon.name]?.count
 
 				if weaponCount > 0 then
 					SetCurrentPedWeapon(playerPed, currentWeapon.hash, true)
-					SetAmmoInClip(playerPed, currentWeapon.hash, currentWeapon.metadata.ammo)
+					SetPedAmmo(playerPed, currentWeapon.hash, (currentWeapon.metadata.ammo or 0) + (currentWeapon.metadata.reserve or 0))
+					SetAmmoInClip(playerPed, currentWeapon.hash, currentWeapon.metadata.ammo or 0)
 					SetPedCurrentWeaponVisible(playerPed, true, false, false, false)
 
 					weaponHash = GetSelectedPedWeapon(playerPed)
@@ -2090,37 +3629,31 @@ RegisterNetEvent('ox_inventory:setPlayerInventory', function(currentDrops, inven
 				DisableControlAction(0, 37, true)
 			end
 
-			if currentWeapon and currentWeapon.timer then
+			if currentWeapon and currentWeapon.timer ~= nil and currentWeapon.timer ~= 0 then
 				DisableControlAction(0, 80, true)
 				DisableControlAction(0, 140, true)
 
-				if currentWeapon.metadata.durability <= 0 or not currentWeapon.timer then
+				if currentWeapon.metadata.durability <= 0 then
 					DisablePlayerFiring(playerId, true)
 				elseif client.aimedfiring and not currentWeapon.melee and currentWeapon.group ~= `GROUP_PETROLCAN` and not IsPlayerFreeAiming(playerId) then
 					DisablePlayerFiring(playerId, true)
 				end
 
 				local weaponAmmo = currentWeapon.metadata.ammo
+				local ammoState = syncCurrentWeaponReserveFromPoolCache(currentWeapon)
+				local weaponReserve = ammoState and (ammoState.reserve or 0) or (currentWeapon.metadata.reserve or 0)
+				local weaponTotalAmmo = (weaponAmmo or 0) + weaponReserve
 
 				if not invBusy and currentWeapon.timer ~= 0 and currentWeapon.timer < GetGameTimer() then
 					currentWeapon.timer = 0
 
-					if weaponAmmo then
-						TriggerServerEvent('ox_inventory:updateWeapon', 'ammo', weaponAmmo)
-
-						if client.autoreload and currentWeapon.ammo and GetAmmoInPedWeapon(playerPed, currentWeapon.hash) == 0 then
-							local slotId = Inventory.GetSlotIdWithItem(currentWeapon.ammo,
-								{ type = currentWeapon.metadata.specialAmmo }, false)
-
-							if slotId then
-								CreateThread(function() useSlot(slotId) end)
-							end
-						end
+					if currentWeapon.ammo then
+						syncCurrentWeaponAmmoPool(true)
 					elseif currentWeapon.metadata.durability then
 						TriggerServerEvent('ox_inventory:updateWeapon', 'melee', currentWeapon.melee)
 						currentWeapon.melee = 0
 					end
-				elseif weaponAmmo then
+				elseif currentWeapon.ammo then
 					if IsPedShooting(playerPed) then
 						local currentAmmo
 						local durabilityDrain = Items[currentWeapon.name].durability
@@ -2134,25 +3667,85 @@ RegisterNetEvent('ox_inventory:setPlayerInventory', function(currentDrops, inven
 								SetPedInfiniteAmmo(playerPed, false, currentWeapon.hash)
 							end
 						else
-							currentAmmo = GetAmmoInPedWeapon(playerPed, currentWeapon.hash)
+							local _, currentClip = GetAmmoInClip(playerPed, currentWeapon.hash)
+							local currentReserve = calculateReserveFromPoolDelta(weaponAmmo, weaponReserve, currentClip)
+							currentAmmo = currentClip + currentReserve
 
-							if currentAmmo < weaponAmmo then
-								currentAmmo = (weaponAmmo < currentAmmo) and 0 or currentAmmo
-								currentWeapon.metadata.ammo = currentAmmo
+							if currentAmmo < weaponTotalAmmo or currentClip ~= weaponAmmo or currentReserve ~= weaponReserve then
+								currentWeapon.metadata.ammo = currentClip
+								currentWeapon.metadata.reserve = currentReserve
+								updateLoadedMagazineRounds(currentWeapon, currentClip)
 								currentWeapon.metadata.durability = currentWeapon.metadata.durability -
-									(durabilityDrain * math.abs((weaponAmmo or 0.1) - currentAmmo))
+									(durabilityDrain * math.abs((weaponTotalAmmo or 0.1) - currentAmmo))
 							end
 						end
 
 						if currentAmmo <= 0 then
-							if cache.vehicle then
-								TaskSwapWeapon(playerPed, true)
-							end
+						if cache.vehicle then
+							TaskSwapWeapon(playerPed, true)
+						end
 
-							currentWeapon.timer = GetGameTimer() + 200
-						else
-							currentWeapon.timer = GetGameTimer() + (GetWeaponTimeBetweenShots(currentWeapon.hash) * 1000) +
-								100
+						currentWeapon.timer = GetGameTimer() + 200
+					else
+						currentWeapon.timer = GetGameTimer() + (GetWeaponTimeBetweenShots(currentWeapon.hash) * 1000) +
+							100
+					end
+				else
+						local _, currentClip = GetAmmoInClip(playerPed, currentWeapon.hash)
+						currentClip = currentClip or 0
+						local expectedTotalAmmo = (weaponAmmo or 0) + weaponReserve
+						local pedTotalAmmo = GetAmmoInPedWeapon(playerPed, currentWeapon.hash) or 0
+
+						if not IsPedReloading(playerPed) and pedTotalAmmo > expectedTotalAmmo and currentClip == (weaponAmmo or 0) then
+							SetPedAmmo(playerPed, currentWeapon.hash, expectedTotalAmmo)
+
+							if shared.ammodebug then
+								print(('[ox_inventory DEBUG] ped ammo reserve trimmed to pool | weapon: %s | clip: %s | reserve: %s | pedTotalBefore: %s'):format(
+									tostring(currentWeapon.hash),
+									tostring(weaponAmmo or 0),
+									tostring(weaponReserve),
+									tostring(pedTotalAmmo)
+								))
+							end
+						end
+
+						if pendingReloadSync.active and GetGameTimer() > pendingReloadSync.expiresAt then
+							clearPendingReloadSync()
+						end
+
+						if currentClip > (weaponAmmo or 0) then
+							local previousClip = weaponAmmo or 0
+							local isPendingReloadForWeapon = pendingReloadSync.active and pendingReloadSync.weaponHash == currentWeapon.hash
+							local nativeReloading = IsPedReloading(playerPed)
+							local reloadGraceWindow = pendingReloadSync.requestedAt > 0 and (GetGameTimer() - pendingReloadSync.requestedAt) <= 1500
+
+							if isPendingReloadForWeapon or nativeReloading or reloadGraceWindow then
+								local latestAmmoState = applyClipChangeToAmmoPool(currentWeapon, previousClip, weaponReserve, currentClip)
+
+								if isPendingReloadForWeapon then
+									clearPendingReloadSync()
+								end
+
+								if shared.ammodebug then
+									print(('[ox_inventory DEBUG] fallback clip increase sync | weapon: %s | clip: %s -> %s | reserve: %s | pending: %s | nativeReloading: %s | grace: %s'):format(
+										tostring(currentWeapon.hash),
+										tostring(previousClip),
+										tostring(currentClip),
+										tostring(latestAmmoState and latestAmmoState.reserve or currentWeapon.metadata.reserve or 0),
+										tostring(isPendingReloadForWeapon),
+										tostring(nativeReloading),
+										tostring(reloadGraceWindow)
+									))
+								end
+							elseif shared.ammodebug then
+								print(('[ox_inventory DEBUG] unexpected clip increase ignored | weapon: %s | clip: %s -> %s | reserve: %s | pedTotal: %s'):format(
+									tostring(currentWeapon.hash),
+									tostring(previousClip),
+									tostring(currentClip),
+									tostring(weaponReserve),
+									tostring(pedTotalAmmo)
+								))
+							end
 						end
 					end
 				elseif currentWeapon.throwable then
@@ -2196,6 +3789,10 @@ end)
 
 AddEventHandler('onResourceStop', function(resourceName)
 	if shared.resource == resourceName then
+		if client.syncCurrentWeaponAmmoPool then
+			client.syncCurrentWeaponAmmoPool(true)
+		end
+
 		client.onLogout()
 	end
 end)
@@ -2217,13 +3814,14 @@ RegisterNetEvent('ox_inventory:viewInventory', function(left, right)
 	currentInventory.type = 'inspect'
 	left.items = PlayerData.inventory
 	left.groups = PlayerData.groups
+	left.weight = PlayerData.weight
 
 	if Utility.enabled then
-		left.utility = Utility.collect(PlayerData.inventory)
-		left.utilityConfig = Utility.config
+		left.utility = applyDynamicUtilityConfig(Utility.collect(PlayerData.inventory))
+		left.utilityConfig = left.utility and left.utility.config or Utility.config
 
 		if currentInventory and currentInventory.items then
-			currentInventory.utility = Utility.collect(currentInventory.items)
+			currentInventory.utility = applyDynamicUtilityConfig(Utility.collect(currentInventory.items))
 		end
 	end
 
@@ -2272,10 +3870,14 @@ RegisterNUICallback('removeComponent', function(data, cb)
 					end
 
 					break
+							end
+						end
+
+						syncCurrentWeaponAmmoPool()
+					else
+						syncCurrentWeaponAmmoPool()
+					end
 				end
-			end
-		end
-	end
 end)
 
 RegisterNUICallback('removeAmmo', function(slot, cb)
@@ -2287,7 +3889,18 @@ RegisterNUICallback('removeAmmo', function(slot, cb)
 	local success = lib.callback.await('ox_inventory:removeAmmoFromWeapon', false, slot)
 
 	if success and slot == currentWeapon?.slot then
-		SetPedAmmo(playerPed, currentWeapon.hash, 0)
+		if type(success) == 'table' then
+			local poolKey = getWeaponAmmoPoolKey(currentWeapon)
+
+			if poolKey then
+				PlayerData.ammoPools[poolKey] = success
+			end
+
+			setCurrentWeaponAmmoFromPool(currentWeapon, success)
+			TriggerServerEvent('ox_inventory:updateAmmoPool', poolKey, success.clip, success.reserve, currentWeapon.slot)
+		else
+			SetPedAmmo(playerPed, currentWeapon.hash, 0)
+		end
 	end
 end)
 
@@ -2296,7 +3909,17 @@ RegisterNUICallback('useItem', function(slot, cb)
 	cb(1)
 end)
 
-local function giveItemToTarget(serverId, slotId, count, fromInv)
+RegisterNUICallback('loadMagazineFromItem', function(data, cb)
+	lib.notify({ type = 'error', description = 'Magazine loading is disabled while the ammo pool system is active.' })
+	cb(false)
+end)
+
+RegisterNUICallback('openWeaponMagazine', function(data, cb)
+	lib.notify({ type = 'error', description = 'Weapon magazine inventories are disabled while the ammo pool system is active.' })
+	cb(false)
+end)
+
+giveItemToTarget = function(serverId, slotId, count, fromInv)
 	if type(slotId) ~= 'number' then return TypeError('slotId', 'number', type(slotId)) end
 	if count and type(count) ~= 'number' then return TypeError('count', 'number', type(count)) end
 
@@ -2317,7 +3940,7 @@ end
 
 exports('giveItemToTarget', giveItemToTarget)
 
-local function isGiveTargetValid(ped, coords)
+isGiveTargetValid = function(ped, coords)
 	if cache.vehicle and GetVehiclePedIsIn(ped, false) == cache.vehicle then
 		return true
 	end
@@ -2361,34 +3984,17 @@ RegisterNUICallback('giveItem', function(data, cb)
 
 	if (props and props.modelp and not props.disableThrow) or isWeapon then
 		client.closeInventory()
+		local placed, response = startItemThrowPreview(item, props, amount, item)
 
-		lib.showTextUI('[N] place\n[ESC] cancel', {
-			position = 'bottom-center',
-
-		})
-
-
-		local entity = exports["Dm-throwitems"]:throwItem(data.slot, props, amount)
-		while DoesEntityExist(entity) do
-			DisableFrontendThisFrame()
-
-			if IsControlJustReleased(2, 200) then
-				DeleteEntity(entity)
-				RemoveWeaponFromPed(playerPed, 'WEAPON_BALL')
-
-				lib.hideTextUI()
-				plyState:set('invBusy', false, true)
+		if placed then
+			if response then
+				updateInventory(response.items, response.weight)
 			end
-
-			if IsControlJustReleased(0, 306) then
-				DeleteEntity(entity)
-				RemoveWeaponFromPed(playerPed, 'WEAPON_BALL')
-				lib.hideTextUI()
-				exports["Dm-throwitems"]:placeItem(data.slot, props, amount)
-			end
-
-			Wait(0)
+		else
+			plyState:set('invBusy', false, true)
 		end
+
+		return
 	end
 
 
@@ -2594,6 +4200,16 @@ RegisterNUICallback('swapItems', function(data, cb)
 
 	swapActive = true
 
+	local fromSlotData = data.fromType == 'player' and PlayerData.inventory[data.fromSlot]
+	local toSlotData = data.toType == 'player' and PlayerData.inventory[data.toSlot]
+	local fromItem = fromSlotData and Items[fromSlotData.name]
+	local toItem = toSlotData and Items[toSlotData.name]
+
+	if data.fromType == 'player' and data.toType == 'player' and fromItem?.ammo and toItem?.magazine then
+		swapActive = false
+		return cb(loadAmmoIntoMagazine(data.fromSlot, data.toSlot, data.count) and true or false)
+	end
+
 	if data.toType == 'newdrop' then
 		if cache.vehicle or IsPedFalling(playerPed) then
 			swapActive = false
@@ -2667,6 +4283,19 @@ RegisterNUICallback('moveToUtilitySlot', function(data, cb)
 end)
 
 RegisterNUICallback('moveFromUtilitySlot', function(data, cb)
+	local utilitySlot = tonumber(data and data.utilitySlot)
+
+	if utilitySlot and Utility.getReservedSlot then
+		local reservedSlot = Utility.getReservedSlot(utilitySlot)
+		local slotData = reservedSlot and PlayerData and PlayerData.inventory and PlayerData.inventory[reservedSlot]
+
+		if slotData and slotData.name == 'parachute' and GetPedParachuteState(playerPed) ~= -1 then
+			lib.notify({ type = 'error', description = 'You cannot remove the parachute while parachuting' })
+			cb(false)
+			return
+		end
+	end
+
 	local success, response = lib.callback.await('ox_inventory:utility:moveFrom', false, data)
 
 	if not success and response then
@@ -2935,7 +4564,7 @@ lib.callback.register('ox_inventory:getVehicleData', function(netid)
 	end
 end)
 
-local function weaponModelFromName(name)
+weaponModelFromName = function(name)
 	local w = joaat(name)
 	if IsWeaponValid(w) then
 		local model = GetWeapontypeModel(w)

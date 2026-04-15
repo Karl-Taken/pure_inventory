@@ -39,6 +39,7 @@ function OxInventory:closeInventory(noEvent)
 	self.open = false
 	self.currentShop = nil
 	self.containerSlot = nil
+	self.weaponMagSlot = nil
 
 	if not noEvent then
 		TriggerClientEvent('ox_inventory:closeInventory', self.id, true)
@@ -401,6 +402,183 @@ function Inventory.SetSlot(inv, item, count, metadata, slot)
 end
 
 local Items = require 'modules.items.server'
+local Magazines = lib.load('data.magazines') or {}
+local MagazineItems = {}
+local WeaponMagazineMaxWeight = 5000
+
+for ammoType, data in pairs(Magazines) do
+    data.ammoType = ammoType
+    MagazineItems[data.name] = data
+end
+
+local function getMagazineConfigByItem(itemName)
+    return MagazineItems[itemName]
+end
+
+local function normaliseMagazineMetadata(slotData, itemData)
+    local metadata = slotData.metadata or {}
+    local magazine = itemData or getMagazineConfigByItem(slotData.name)
+
+    if not magazine then return metadata end
+
+    metadata.ammoType = metadata.ammoType or magazine.ammoType
+    metadata.capacity = metadata.capacity or magazine.capacity or 0
+    metadata.ammo = math.max(0, math.min(metadata.ammo or metadata.rounds or 0, metadata.capacity))
+    metadata.rounds = metadata.ammo
+    metadata.weight = (Items(metadata.ammoType)?.weight or 0) * metadata.ammo
+
+    if metadata.specialAmmo and type(metadata.specialAmmo) ~= 'string' then
+        metadata.specialAmmo = nil
+    end
+
+    return metadata
+end
+
+local function findWeaponByMagazineInventory(playerInventory, inventoryId)
+    if not playerInventory then return end
+
+    for slot, slotData in pairs(playerInventory.items) do
+        if slotData and slotData.metadata?.magContainer == inventoryId and Items(slotData.name)?.weapon then
+            return slotData, slot
+        end
+    end
+end
+
+local function setInventorySlotData(inv, slot, item, metadata)
+    local current = inv.items[slot]
+
+    if current then
+        inv.weight -= current.weight
+    end
+
+    if item then
+        local slotData = {
+            name = item.name,
+            label = item.label,
+            weight = item.weight,
+            slot = slot,
+            count = 1,
+            description = item.description,
+            metadata = metadata,
+            stack = item.stack,
+            close = item.close
+        }
+
+        slotData.weight = Inventory.SlotWeight(item, slotData)
+        inv.items[slot] = slotData
+        inv.weight += slotData.weight
+    else
+        inv.items[slot] = nil
+    end
+
+    inv.changed = true
+
+    inv:syncSlotsWithClients({
+        {
+            item = inv.items[slot] or { slot = slot },
+            inventory = inv.id
+        }
+    }, true)
+
+    if server.syncInventory then server.syncInventory(inv) end
+end
+
+local function ensureWeaponMagazineInventory(weapon)
+    local containerId = weapon.metadata?.magContainer
+
+    if not containerId then return end
+
+    local inventory = Inventory(containerId)
+
+    if not inventory then
+        inventory = Inventory.Create(containerId, ('%s Magazine'):format(weapon.label or weapon.name), 'weaponmag', 1, 0, WeaponMagazineMaxWeight, false, {})
+    end
+
+    return inventory
+end
+
+local function syncWeaponMagazineInventory(weapon)
+    local inventory = ensureWeaponMagazineInventory(weapon)
+
+    if not inventory then return end
+
+    local loadedMagazine = weapon.metadata.loadedMagazine
+
+    if loadedMagazine?.name then
+        local magazineItem = Items(loadedMagazine.name)
+
+        if not magazineItem then return end
+
+        local metadata = normaliseMagazineMetadata({
+            name = loadedMagazine.name,
+            metadata = {
+                ammoType = loadedMagazine.ammoType,
+                capacity = loadedMagazine.capacity,
+                ammo = loadedMagazine.ammo,
+                rounds = loadedMagazine.rounds,
+                specialAmmo = loadedMagazine.specialAmmo,
+            }
+        }, getMagazineConfigByItem(loadedMagazine.name))
+
+        setInventorySlotData(inventory, 1, magazineItem, metadata)
+    else
+        setInventorySlotData(inventory, 1, nil)
+    end
+end
+
+local function syncWeaponFromMagazineInventory(playerInventory, inventoryId)
+    local weapon = findWeaponByMagazineInventory(playerInventory, inventoryId)
+
+    if not weapon then return end
+
+    local inventory = Inventory(inventoryId)
+    local slotData = inventory and inventory.items[1]
+    local item = Items(weapon.name)
+
+    if not item?.weapon then return end
+
+    local previousWeight = weapon.weight or Inventory.SlotWeight(item, weapon)
+
+    if slotData and MagazineItems[slotData.name] then
+        slotData.metadata = normaliseMagazineMetadata(slotData, getMagazineConfigByItem(slotData.name))
+
+        if slotData.metadata.ammoType == item.ammoname then
+            weapon.metadata.loadedMagazine = {
+                name = slotData.name,
+                ammoType = slotData.metadata.ammoType,
+                capacity = slotData.metadata.capacity,
+                ammo = slotData.metadata.ammo,
+                rounds = slotData.metadata.rounds,
+                specialAmmo = slotData.metadata.specialAmmo,
+            }
+            weapon.metadata.ammo = weapon.metadata.loadedMagazine.ammo
+            weapon.metadata.specialAmmo = weapon.metadata.loadedMagazine.specialAmmo
+        else
+            weapon.metadata.loadedMagazine = nil
+            weapon.metadata.ammo = 0
+            weapon.metadata.specialAmmo = nil
+            setInventorySlotData(inventory, 1, nil)
+        end
+    else
+        weapon.metadata.loadedMagazine = nil
+        weapon.metadata.ammo = 0
+        weapon.metadata.specialAmmo = nil
+    end
+
+    weapon.weight = Inventory.SlotWeight(item, weapon)
+    playerInventory.weight = playerInventory.weight - previousWeight + weapon.weight
+    playerInventory.changed = true
+
+    playerInventory:syncSlotsWithPlayer({
+        { item = weapon }
+    }, playerInventory.weight)
+
+    if server.syncInventory then server.syncInventory(playerInventory) end
+end
+
+Inventory.FindWeaponByMagazineInventory = findWeaponByMagazineInventory
+Inventory.SyncWeaponMagazineInventory = syncWeaponMagazineInventory
+Inventory.SyncWeaponFromMagazineInventory = syncWeaponFromMagazineInventory
 
 CreateThread(function()
     Inventory.accounts = server.accounts
@@ -1204,7 +1382,22 @@ function Inventory.AddItem(inv, item, count, metadata, slot, cb)
 		}, true)
 
 		if invokingResource then
-			lib.logger(inv.owner, 'addItem', ('"%s" added %sx %s to "%s"'):format(invokingResource, count, item.name, inv.label))
+			local logMessage = ('"%s" added %sx %s to "%s"'):format(invokingResource, count, item.name, inv.label)
+			lib.logger(inv.owner, 'addItem', logMessage)
+			PureAdminLogger(inv.player and inv.id or nil, 'ox_inventory_add_item', logMessage, {
+				action = 'add_item',
+				resource = invokingResource,
+				target = {
+					label = inv.label,
+					owner = inv.owner,
+					id = inv.id,
+					type = inv.type,
+				},
+				item = item.name,
+				count = count,
+				slot = toSlot,
+				metadata = slotMetadata,
+			})
 		end
 
 		success = true
@@ -1226,7 +1419,21 @@ function Inventory.AddItem(inv, item, count, metadata, slot, cb)
 		inv:syncSlotsWithClients(toSlot, true)
 
 		if invokingResource then
-			lib.logger(inv.owner, 'addItem', ('"%s" added %sx %s to "%s"'):format(invokingResource, added, item.name, inv.label))
+			local logMessage = ('"%s" added %sx %s to "%s"'):format(invokingResource, added, item.name, inv.label)
+			lib.logger(inv.owner, 'addItem', logMessage)
+			PureAdminLogger(inv.player and inv.id or nil, 'ox_inventory_add_item', logMessage, {
+				action = 'add_item',
+				resource = invokingResource,
+				target = {
+					label = inv.label,
+					owner = inv.owner,
+					id = inv.id,
+					type = inv.type,
+				},
+				item = item.name,
+				count = added,
+				slots = toSlot,
+			})
 		end
 
 		for i = 1, #toSlot do
@@ -1518,7 +1725,22 @@ function Inventory.RemoveItem(inv, item, count, metadata, slot, ignoreTotal, str
 			local invokingResource = server.loglevel > 1 and GetInvokingResource()
 
 			if invokingResource then
-				-- lib.logger(inv.owner, 'removeItem', ('"%s" removed %sx %s from "%s"'):format(invokingResource, removed, item.name, inv.label))
+				local logMessage = ('"%s" removed %sx %s from "%s"'):format(invokingResource, removed, item.name, inv.label)
+				lib.logger(inv.owner, 'removeItem', logMessage)
+				PureAdminLogger(inv.player and inv.id or nil, 'ox_inventory_remove_item', logMessage, {
+					action = 'remove_item',
+					resource = invokingResource,
+					target = {
+						label = inv.label,
+						owner = inv.owner,
+						id = inv.id,
+						type = inv.type,
+					},
+					item = item.name,
+					count = removed,
+					slots = slots,
+					metadata = metadata,
+				})
 			end
 
 			if dropRemovals then
@@ -2096,7 +2318,25 @@ local function dropItem(source, fromInventory, fromData, data)
 
 	-- sss 
 	if server.loglevel > 0 then
-		lib.logger(playerInventory and playerInventory.owner or fromInventory.owner, 'swapSlots', ('%sx %s transferred from "%s (Citizen ID: %s)" to "%s"'):format(data.count, toData.name, fromInventory.label, fromInventory.owner, dropId))
+		local logMessage = ('%sx %s transferred from "%s (Citizen ID: %s)" to "%s"'):format(data.count, toData.name, fromInventory.label, fromInventory.owner, dropId)
+		lib.logger(playerInventory and playerInventory.owner or fromInventory.owner, 'swapSlots', logMessage)
+		PureAdminLogger(playerInventory and playerInventory.id or nil, 'ox_inventory_swap_to_drop', logMessage, {
+			action = 'swap_slots_drop',
+			fromInventory = {
+				label = fromInventory.label,
+				owner = fromInventory.owner,
+				id = fromInventory.id,
+				type = fromInventory.type,
+			},
+			toInventory = {
+				id = dropId,
+				type = 'drop',
+			},
+			item = toData.name,
+			count = data.count,
+			fromSlot = data.fromSlot,
+			toSlot = data.toSlot,
+		})
 	end
 
 	if server.syncInventory then
@@ -2115,6 +2355,68 @@ local function dropItem(source, fromInventory, fromData, data)
 	}
 end
 
+lib.callback.register('ox_inventory:throwItemDrop', function(source, data)
+	if type(data) ~= 'table' then return false end
+
+	local function throwServerDebug(...)
+		if not shared.ammodebug then return end
+
+		local parts = table.pack(...)
+		for i = 1, parts.n do
+			parts[i] = tostring(parts[i])
+		end
+
+		lib.print.info('[throw-server-debug]', table.unpack(parts, 1, parts.n))
+	end
+
+	local playerInventory = Inventory(source)
+
+	if not playerInventory then return false end
+
+	local slot = tonumber(data.slot)
+	local count = math.max(1, math.floor(tonumber(data.count) or 1))
+
+	if not slot then return false end
+
+	local fromData = playerInventory.items[slot]
+
+	if not fromData then return false end
+
+	throwServerDebug('throwItemDrop:request', 'source', source, 'slot', slot, 'count', count, 'coords',
+		data.coords and json.encode(data.coords) or 'nil', 'startCoords', data.startCoords and json.encode(data.startCoords) or 'nil',
+		'model', data.model or 'nil', 'itemWeight', data.itemWeight or 'nil', 'instance', data.instance or 'nil')
+
+	if count > fromData.count then
+		count = fromData.count
+	end
+
+	local success, response = dropItem(source, playerInventory, fromData, {
+		fromSlot = slot,
+		toSlot = 1,
+		count = count,
+		coords = data.coords,
+		instance = data.instance,
+	})
+
+	throwServerDebug('throwItemDrop:result', 'success', success and 'true' or 'false', 'coords',
+		data.coords and json.encode(data.coords) or 'nil', 'responseWeight', response and response.weight or 'nil',
+		'items', response and response.items and json.encode(response.items) or 'nil')
+
+	if success and data.model and data.startCoords and data.coords then
+		for _, playerId in ipairs(GetPlayers()) do
+			playerId = tonumber(playerId)
+
+			if playerId and playerId ~= source then
+				throwServerDebug('throwItemDrop:broadcast_visual', 'targetPlayer', playerId, 'model', data.model, 'startCoords',
+					json.encode(data.startCoords), 'targetCoords', json.encode(data.coords), 'itemWeight', data.itemWeight or 'nil')
+				TriggerClientEvent('ox_inventory:playThrowVisual', playerId, data.model, data.startCoords, data.coords, data.itemWeight)
+			end
+		end
+	end
+
+	return success, response
+end)
+
 local activeSlots = {}
 
 ---@param source number
@@ -2128,6 +2430,10 @@ lib.callback.register('ox_inventory:swapItems', function(source, data)
 
 	local function resolveInventory(invType, invId)
 		if invType == 'player' then
+			return playerInventory
+		end
+
+		if invType == 'newdrop' then
 			return playerInventory
 		end
 
@@ -2172,6 +2478,7 @@ lib.callback.register('ox_inventory:swapItems', function(source, data)
 	local fromOtherPlayer = fromInventory.player and fromInventory ~= playerInventory
 	local toOtherPlayer = toInventory.player and toInventory ~= playerInventory
 	local toData = toInventory.items[data.toSlot]
+	local weaponMagTarget = toInventory.type == 'weaponmag' and findWeaponByMagazineInventory(playerInventory, toInventory.id)
 
 	if not sameInventory and (fromInventory.type == 'policeevidence' or (toInventory.type == 'policeevidence' and toData)) then
 		local group, rank = server.hasGroup(playerInventory, shared.police)
@@ -2219,6 +2526,15 @@ lib.callback.register('ox_inventory:swapItems', function(source, data)
 	end
 
 		if fromData then
+            if weaponMagTarget then
+                local weaponItem = Items(weaponMagTarget.name)
+                local fromItem = Items(fromData.name)
+
+                if data.toSlot ~= 1 or data.count ~= 1 or not fromItem?.magazine or fromItem.ammoType ~= weaponItem?.ammoname then
+                    return false
+                end
+            end
+
             if fromData.metadata.container and toInventory.type == 'container' then return false end
             if toData and toData.metadata.container and fromInventory.type == 'container' then return false end
 
@@ -2275,7 +2591,34 @@ lib.callback.register('ox_inventory:swapItems', function(source, data)
 						toData, fromData = Inventory.SwapSlots(fromInventory, toInventory, data.fromSlot, data.toSlot) --[[@as table]]
 
 						if server.loglevel > 0 then
-							lib.logger(playerInventory.owner, 'swapSlots', ('%sx %s transferred from "%s" to "%s" for %sx %s'):format(fromData.count, fromData.name, fromInventory.owner and fromInventory.label or fromInventory.id, toInventory.owner and toInventory.label or toInventory.id, toData.count, toData.name))
+							local logMessage = ('%sx %s transferred from "%s" to "%s" for %sx %s'):format(fromData.count, fromData.name, fromInventory.owner and fromInventory.label or fromInventory.id, toInventory.owner and toInventory.label or toInventory.id, toData.count, toData.name)
+							lib.logger(playerInventory.owner, 'swapSlots', logMessage)
+							PureAdminLogger(playerInventory and playerInventory.id or nil, 'ox_inventory_swap_slots', logMessage, {
+								action = 'swap_slots',
+								mode = 'swap',
+								fromInventory = {
+									label = fromInventory.owner and fromInventory.label or fromInventory.id,
+									owner = fromInventory.owner,
+									id = fromInventory.id,
+									type = fromInventory.type,
+								},
+								toInventory = {
+									label = toInventory.owner and toInventory.label or toInventory.id,
+									owner = toInventory.owner,
+									id = toInventory.id,
+									type = toInventory.type,
+								},
+								fromItem = {
+									name = fromData.name,
+									count = fromData.count,
+									slot = data.fromSlot,
+								},
+								toItem = {
+									name = toData.name,
+									count = toData.count,
+									slot = data.toSlot,
+								},
+							})
 						end
 					else return false, 'cannot_carry' end
 				else
@@ -2318,7 +2661,28 @@ lib.callback.register('ox_inventory:swapItems', function(source, data)
 						end
 
 						if server.loglevel > 0 then
-							lib.logger(playerInventory.owner, 'swapSlots', ('%sx %s transferred from "%s" to "%s"'):format(data.count, fromData.name, fromInventory.owner and fromInventory.label or fromInventory.id, toInventory.owner and toInventory.label or toInventory.id))
+							local logMessage = ('%sx %s transferred from "%s" to "%s"'):format(data.count, fromData.name, fromInventory.owner and fromInventory.label or fromInventory.id, toInventory.owner and toInventory.label or toInventory.id)
+							lib.logger(playerInventory.owner, 'swapSlots', logMessage)
+							PureAdminLogger(playerInventory and playerInventory.id or nil, 'ox_inventory_swap_slots', logMessage, {
+								action = 'swap_slots',
+								mode = 'stack',
+								fromInventory = {
+									label = fromInventory.owner and fromInventory.label or fromInventory.id,
+									owner = fromInventory.owner,
+									id = fromInventory.id,
+									type = fromInventory.type,
+								},
+								toInventory = {
+									label = toInventory.owner and toInventory.label or toInventory.id,
+									owner = toInventory.owner,
+									id = toInventory.id,
+									type = toInventory.type,
+								},
+								item = fromData.name,
+								count = data.count,
+								fromSlot = data.fromSlot,
+								toSlot = data.toSlot,
+							})
 						end
 					end
 
@@ -2368,7 +2732,28 @@ lib.callback.register('ox_inventory:swapItems', function(source, data)
 						end
 
 						if server.loglevel > 0 then
-							lib.logger(playerInventory.owner, 'swapSlots', ('%sx %s transferred from "%s" to "%s"'):format(data.count, fromData.name, fromInventory.owner and fromInventory.label or fromInventory.id, toInventory.owner and toInventory.label or toInventory.id))
+							local logMessage = ('%sx %s transferred from "%s" to "%s"'):format(data.count, fromData.name, fromInventory.owner and fromInventory.label or fromInventory.id, toInventory.owner and toInventory.label or toInventory.id)
+							lib.logger(playerInventory.owner, 'swapSlots', logMessage)
+							PureAdminLogger(playerInventory and playerInventory.id or nil, 'ox_inventory_swap_slots', logMessage, {
+								action = 'swap_slots',
+								mode = 'move',
+								fromInventory = {
+									label = fromInventory.owner and fromInventory.label or fromInventory.id,
+									owner = fromInventory.owner,
+									id = fromInventory.id,
+									type = fromInventory.type,
+								},
+								toInventory = {
+									label = toInventory.owner and toInventory.label or toInventory.id,
+									owner = toInventory.owner,
+									id = toInventory.id,
+									type = toInventory.type,
+								},
+								item = fromData.name,
+								count = data.count,
+								fromSlot = data.fromSlot,
+								toSlot = data.toSlot,
+							})
 						end
 					end
 
@@ -2898,6 +3283,10 @@ local function saveInventories(clearInventories)
         if not ok and err then return lib.print.error(err) end
     end
 
+    if server.saveDirtyPlayerAmmoPools then
+        server.saveDirtyPlayerAmmoPools()
+    end
+
     if not clearInventories then return end
 
     for _, inv in pairs(Inventories) do
@@ -2934,17 +3323,29 @@ AddEventHandler('playerDropped', function()
 end)
 
 AddEventHandler('txAdmin:events:serverShuttingDown', function()
+	if server.saveDirtyPlayerAmmoPools then
+		server.saveDirtyPlayerAmmoPools()
+	end
+
 	Inventory.SaveInventories(true, false)
 end)
 
 AddEventHandler('txAdmin:events:scheduledRestart', function(eventData)
     if eventData.secondsRemaining ~= 60 then return end
 
+	if server.saveDirtyPlayerAmmoPools then
+		server.saveDirtyPlayerAmmoPools()
+	end
+
 	Inventory.SaveInventories(true, true)
 end)
 
 AddEventHandler('onResourceStop', function(resource)
 	if resource == shared.resource then
+		if server.saveDirtyPlayerAmmoPools then
+			server.saveDirtyPlayerAmmoPools()
+		end
+
 		Inventory.SaveInventories(true, false)
 	end
 end)
@@ -2960,6 +3361,15 @@ RegisterServerEvent('ox_inventory:closeInventory', function()
 		end
 
 		inventory:closeInventory(true)
+	end
+end)
+
+AddEventHandler('ox_inventory:closedInventory', function(playerId, invId)
+	local inventory = Inventory(invId)
+	local playerInventory = Inventory(playerId)
+
+	if inventory?.type == 'weaponmag' and playerInventory then
+		syncWeaponFromMagazineInventory(playerInventory, invId)
 	end
 end)
 
@@ -3034,7 +3444,25 @@ local function giveItem(playerId, slot, target, count, fromInv)
 			if Inventory.AddItem(toInventory, item, count, data.metadata, toSlot) then
 				if Inventory.RemoveItem(fromInventory, item, count, data.metadata, slot) then
 					if server.loglevel > 0 then
-						lib.logger(fromInventory.owner, 'giveItem', ('"%s" gave %sx %s to "%s"'):format(fromInventory.label, count, data.name, toInventory.label))
+						local logMessage = ('"%s" gave %sx %s to "%s"'):format(fromInventory.label, count, data.name, toInventory.label)
+						lib.logger(fromInventory.owner, 'giveItem', logMessage)
+						PureAdminLogger(fromInventory.player and fromInventory.id or nil, 'ox_inventory_give_item', logMessage, {
+							action = 'give_item',
+							fromInventory = {
+								label = fromInventory.label,
+								owner = fromInventory.owner,
+								id = fromInventory.id,
+								type = fromInventory.type,
+							},
+							toInventory = {
+								label = toInventory.label,
+								owner = toInventory.owner,
+								id = toInventory.id,
+								type = toInventory.type,
+							},
+							item = data.name,
+							count = count,
+						})
 					end
 
                     TriggerClientEvent('ox_inventory:playGiveAnim', toInventory.id)
@@ -3050,6 +3478,131 @@ end
 
 lib.callback.register('ox_inventory:giveItem', giveItem)
 RegisterServerEvent('ox_inventory:giveItem', function(...) giveItem(source, ...) end)
+
+lib.callback.register('ox_inventory:fillMagazine', function(source, ammoSlot, magazineSlot, amount, specialAmmo)
+    local inventory = Inventory(source)
+
+    if not inventory or not ammoSlot or not magazineSlot or not amount or amount < 1 then return false end
+
+    local ammoItem = inventory.items[ammoSlot]
+    local magazineItem = inventory.items[magazineSlot]
+
+    if not ammoItem or not magazineItem then return false end
+
+    local ammoData = Items(ammoItem.name)
+    local magazineData = Items(magazineItem.name)
+
+    if not ammoData?.ammo or not magazineData?.magazine then return false end
+
+    magazineItem.metadata = normaliseMagazineMetadata(magazineItem, getMagazineConfigByItem(magazineItem.name))
+
+    if magazineItem.metadata.ammoType ~= ammoItem.name then return false end
+
+    if magazineItem.metadata.ammo > 0 and magazineItem.metadata.specialAmmo ~= specialAmmo then
+        return false
+    end
+
+    amount = math.min(amount, magazineItem.metadata.capacity - magazineItem.metadata.ammo)
+
+    if amount < 1 then return false end
+
+    if not Inventory.RemoveItem(inventory, ammoItem.name, amount, specialAmmo and { type = specialAmmo } or nil, ammoSlot) then
+        return false
+    end
+
+    local previousWeight = magazineItem.weight or Inventory.SlotWeight(magazineData, magazineItem)
+
+    magazineItem.metadata.ammo += amount
+    magazineItem.metadata.rounds = magazineItem.metadata.ammo
+    magazineItem.metadata.specialAmmo = specialAmmo or magazineItem.metadata.specialAmmo
+    magazineItem.metadata.weight = (ammoData.weight or 0) * magazineItem.metadata.ammo
+    magazineItem.weight = Inventory.SlotWeight(magazineData, magazineItem)
+    inventory.weight = inventory.weight - previousWeight + magazineItem.weight
+    inventory.changed = true
+
+    inventory:syncSlotsWithPlayer({
+        { item = magazineItem }
+    }, inventory.weight)
+
+    if server.syncInventory then server.syncInventory(inventory) end
+
+    return true
+end)
+
+lib.callback.register('ox_inventory:loadMagazine', function(source, magazineSlot, weaponSlot)
+    local inventory = Inventory(source)
+
+    if not inventory then return false end
+
+    weaponSlot = weaponSlot or inventory.weapon
+
+    local weapon = inventory.items[weaponSlot]
+    local magazineItem = inventory.items[magazineSlot]
+
+    if not weapon or not magazineItem then return false end
+
+    local weaponData = Items(weapon.name)
+    local magazineData = Items(magazineItem.name)
+    local magazineConfig = getMagazineConfigByItem(magazineItem.name)
+
+    if not weaponData?.weapon or not magazineData?.magazine or not magazineConfig then return false end
+
+    magazineItem.metadata = normaliseMagazineMetadata(magazineItem, magazineConfig)
+
+    if magazineItem.metadata.ammoType ~= weaponData.ammoname then return false end
+
+    local removedMagazineMetadata = table.deepclone(magazineItem.metadata)
+
+    if not Inventory.RemoveItem(inventory, magazineItem.name, 1, nil, magazineSlot) then
+        return false
+    end
+
+    local previousLoadedMagazine = weapon.metadata.loadedMagazine
+
+    if previousLoadedMagazine?.name then
+        local restoreMetadata = {
+            ammoType = previousLoadedMagazine.ammoType or weaponData.ammoname,
+            capacity = previousLoadedMagazine.capacity or Magazines[weaponData.ammoname]?.capacity or 0,
+            ammo = previousLoadedMagazine.ammo or previousLoadedMagazine.rounds or 0,
+            rounds = previousLoadedMagazine.ammo or previousLoadedMagazine.rounds or 0,
+            specialAmmo = previousLoadedMagazine.specialAmmo,
+        }
+
+        if not Inventory.AddItem(inventory, previousLoadedMagazine.name, 1, restoreMetadata, magazineSlot) then
+            Inventory.AddItem(inventory, magazineItem.name, 1, removedMagazineMetadata, magazineSlot)
+            return false
+        end
+    end
+
+    local previousWeight = weapon.weight or Inventory.SlotWeight(weaponData, weapon)
+
+    weapon.metadata.loadedMagazine = {
+        name = magazineItem.name,
+        ammoType = magazineItem.metadata.ammoType,
+        capacity = magazineItem.metadata.capacity,
+        ammo = magazineItem.metadata.ammo,
+        rounds = magazineItem.metadata.ammo,
+        specialAmmo = magazineItem.metadata.specialAmmo,
+    }
+    weapon.metadata.ammo = magazineItem.metadata.ammo
+    weapon.metadata.specialAmmo = magazineItem.metadata.specialAmmo
+    weapon.weight = Inventory.SlotWeight(weaponData, weapon)
+    inventory.weight = inventory.weight - previousWeight + weapon.weight
+    inventory.changed = true
+    syncWeaponMagazineInventory(weapon)
+
+    inventory:syncSlotsWithPlayer({
+        { item = weapon }
+    }, inventory.weight)
+
+    if server.syncInventory then server.syncInventory(inventory) end
+
+    return {
+        ammo = weapon.metadata.ammo,
+        specialAmmo = weapon.metadata.specialAmmo,
+        loadedMagazine = weapon.metadata.loadedMagazine,
+    }
+end)
 
 local function updateWeapon(source, action, value, slot, specialAmmo)
 	local inventory = Inventory(source)
@@ -3123,6 +3676,31 @@ local function updateWeapon(source, action, value, slot, specialAmmo)
 					table.insert(weapon.metadata.components, component.name)
 					weapon.weight = Inventory.SlotWeight(item, weapon)
 				end
+			elseif action == 'ammo' and type == 'number' then
+				local previousAmmo = weapon.metadata.ammo or 0
+				local previousWeight = weapon.weight or Inventory.SlotWeight(item, weapon)
+
+				if item.hash == `WEAPON_FIREEXTINGUISHER` or item.hash == `WEAPON_PETROLCAN` or item.hash == `WEAPON_HAZARDCAN` or item.hash == `WEAPON_FERTILIZERCAN` then
+					weapon.metadata.durability = math.floor(value)
+					weapon.metadata.ammo = weapon.metadata.durability
+				else
+					weapon.metadata.ammo = value
+
+					if value < previousAmmo then
+						local durability = Items(weapon.name).durability * math.abs((previousAmmo or 0.1) - value)
+						weapon.metadata.durability = weapon.metadata.durability - durability
+					end
+				end
+
+				if weapon.metadata.loadedMagazine then
+					weapon.metadata.loadedMagazine.ammo = weapon.metadata.ammo
+					weapon.metadata.loadedMagazine.rounds = weapon.metadata.ammo
+					weapon.metadata.loadedMagazine.specialAmmo = weapon.metadata.specialAmmo
+				end
+
+				weapon.weight = Inventory.SlotWeight(item, weapon)
+				inventory.weight = inventory.weight - previousWeight + weapon.weight
+				syncWeaponMagazineInventory(weapon)
 			elseif action == 'melee' and value > 0 then
 				weapon.metadata.durability = weapon.metadata.durability - ((Items(weapon.name).durability or 1) * value)
 			end
@@ -3180,9 +3758,68 @@ lib.callback.register('ox_inventory:removeAmmoFromWeapon', function(source, slot
 
 	if not item or not item.ammoname then return end
 
+	if slotData.metadata.loadedMagazine?.name then
+		local loadedMagazine = slotData.metadata.loadedMagazine
+		local magazineMetadata = {
+			ammoType = loadedMagazine.ammoType or item.ammoname,
+			capacity = loadedMagazine.capacity or Magazines[item.ammoname]?.capacity or 0,
+			ammo = loadedMagazine.ammo or loadedMagazine.rounds or slotData.metadata.ammo or 0,
+			rounds = loadedMagazine.ammo or loadedMagazine.rounds or slotData.metadata.ammo or 0,
+			specialAmmo = loadedMagazine.specialAmmo or slotData.metadata.specialAmmo,
+		}
+
+		if Inventory.AddItem(inventory, loadedMagazine.name, 1, magazineMetadata) then
+			local previousWeight = slotData.weight or Inventory.SlotWeight(item, slotData)
+			slotData.metadata.loadedMagazine = nil
+			slotData.metadata.ammo = 0
+			slotData.metadata.specialAmmo = nil
+			slotData.weight = Inventory.SlotWeight(item, slotData)
+			inventory.weight = inventory.weight - previousWeight + slotData.weight
+			inventory.changed = true
+			syncWeaponMagazineInventory(slotData)
+
+			inventory:syncSlotsWithPlayer({
+				{ item = slotData }
+			}, inventory.weight)
+
+			if server.syncInventory then server.syncInventory(inventory) end
+
+			return true
+		end
+
+		return
+	end
+
+	if item.ammoname then
+		local clipAmmo = math.max(0, tonumber(slotData.metadata.ammo) or 0)
+		local reserveAmmo = math.max(0, tonumber(slotData.metadata.reserve) or 0)
+		local maxReserve = math.max(0, tonumber(slotData.metadata.maxReserve) or reserveAmmo + clipAmmo)
+
+		slotData.metadata.ammo = 0
+		slotData.metadata.reserve = math.min(maxReserve, reserveAmmo + clipAmmo)
+		slotData.metadata.loadedMagazine = nil
+		slotData.metadata.specialAmmo = nil
+		slotData.weight = Inventory.SlotWeight(item, slotData)
+		syncWeaponMagazineInventory(slotData)
+
+		inventory:syncSlotsWithPlayer({
+			{ item = slotData }
+		}, inventory.weight)
+
+		if server.syncInventory then server.syncInventory(inventory) end
+
+		return {
+			clip = slotData.metadata.ammo,
+			reserve = slotData.metadata.reserve,
+		}
+	end
+
 	if Inventory.AddItem(inventory, item.ammoname, slotData.metadata.ammo, { type = slotData.metadata.specialAmmo or nil }) then
 		slotData.metadata.ammo = 0
+		slotData.metadata.loadedMagazine = nil
+		slotData.metadata.specialAmmo = nil
 		slotData.weight = Inventory.SlotWeight(item, slotData)
+		syncWeaponMagazineInventory(slotData)
 
 		inventory:syncSlotsWithPlayer({
 			{ item = slotData }

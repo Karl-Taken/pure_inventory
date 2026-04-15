@@ -9,6 +9,7 @@ export type ItemsPayload = { item: Slot; inventory?: string | number; inventoryT
 interface Payload {
   items?: ItemsPayload | ItemsPayload[];
   itemCount?: Record<string, number>;
+  weight?: { inventoryId: string | number; weight: number };
   weightData?: { inventoryId: string; maxWeight: number };
   slotsData?: { inventoryId: string; slots: number };
   leftUtility?: UtilityState;
@@ -32,6 +33,7 @@ export const refreshSlotsReducer: CaseReducer<State, PayloadAction<Payload>> = (
       if (state.leftInventory.backpack && inventoryId === state.leftInventory.backpack.id) return state.leftInventory.backpack;
       if (inventoryId === state.rightInventory.id) return state.rightInventory;
       if (state.rightInventory.backpack && inventoryId === state.rightInventory.backpack.id) return state.rightInventory.backpack;
+      if (state.rightInventory.weaponMagazine && inventoryId === state.rightInventory.weaponMagazine.id) return state.rightInventory.weaponMagazine;
 
       return state.rightInventory;
     };
@@ -93,6 +95,22 @@ export const refreshSlotsReducer: CaseReducer<State, PayloadAction<Payload>> = (
     }
   }
 
+  if (action.payload.weight) {
+    const { inventoryId, weight } = action.payload.weight;
+
+    if (inventoryId === state.leftInventory.id || inventoryId === 'player') {
+      state.leftInventory.weight = weight;
+    } else if (state.leftInventory.backpack && inventoryId === state.leftInventory.backpack.id) {
+      state.leftInventory.backpack.weight = weight;
+    } else if (inventoryId === state.rightInventory.id) {
+      state.rightInventory.weight = weight;
+    } else if (state.rightInventory.backpack && inventoryId === state.rightInventory.backpack.id) {
+      state.rightInventory.backpack.weight = weight;
+    } else if (state.rightInventory.weaponMagazine && inventoryId === state.rightInventory.weaponMagazine.id) {
+      state.rightInventory.weaponMagazine.weight = weight;
+    }
+  }
+
   if (action.payload.weightData) {
     const { inventoryId, maxWeight } = action.payload.weightData;
 
@@ -104,6 +122,8 @@ export const refreshSlotsReducer: CaseReducer<State, PayloadAction<Payload>> = (
       state.rightInventory.maxWeight = maxWeight;
     } else if (state.rightInventory.backpack && inventoryId === state.rightInventory.backpack.id) {
       state.rightInventory.backpack.maxWeight = maxWeight;
+    } else if (state.rightInventory.weaponMagazine && inventoryId === state.rightInventory.weaponMagazine.id) {
+      state.rightInventory.weaponMagazine.maxWeight = maxWeight;
     }
   }
 
@@ -133,6 +153,13 @@ export const refreshSlotsReducer: CaseReducer<State, PayloadAction<Payload>> = (
       const existing = state.rightInventory.backpack.items || [];
       state.rightInventory.backpack.slots = slots;
       state.rightInventory.backpack.items = Array.from(Array(slots), (_, index) => {
+        const slot = index + 1;
+        return existing.find((entry) => entry.slot === slot) || { slot };
+      });
+    } else if (state.rightInventory.weaponMagazine && inventoryId === state.rightInventory.weaponMagazine.id) {
+      const existing = state.rightInventory.weaponMagazine.items || [];
+      state.rightInventory.weaponMagazine.slots = slots;
+      state.rightInventory.weaponMagazine.items = Array.from(Array(slots), (_, index) => {
         const slot = index + 1;
         return existing.find((entry) => entry.slot === slot) || { slot };
       });

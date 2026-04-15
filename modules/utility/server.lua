@@ -24,8 +24,29 @@ local armorItems = UtilityConfig.armorItems or {}
 local armorRepairItems = UtilityConfig.armorRepairItems or {}
 local armorDamageRate = UtilityConfig.armorDamageRate or 1.0
 
+local function syncQbxArmorMetadata(source, armorValue)
+    if type(source) ~= 'number' or source <= 0 then return end
+
+    if GetResourceState('qbx_core') ~= 'started' then return end
+
+    exports.qbx_core:SetMetadata(source, 'armor', math.max(0, math.floor((armorValue or 0) + 0.5)))
+end
+
 local function getReservedSlot(index)
     return slotOffset + index
+end
+
+local function getUtilitySlotFromSlot(slot, metadata)
+    if metadata and metadata.utilitySlot then
+        return tonumber(metadata.utilitySlot)
+    end
+
+    if slot and slotOffset > 0 and slot >= slotOffset then
+        local utilitySlot = slot - slotOffset
+        if utilitySlot >= 1 and utilitySlot <= (UtilityConfig.slots or 0) then
+            return utilitySlot
+        end
+    end
 end
 
 local function cloneMetadata(metadata)
@@ -48,6 +69,37 @@ local function getArmorValue(itemName)
     end
 
     return value, config
+end
+
+local function getInitialArmorDurability(itemName)
+    local _, config = getArmorValue(itemName)
+    if type(config) ~= 'table' then
+        return 100
+    end
+
+    local durability = tonumber(config.initialDurability or config.durability or 100) or 100
+    return math.max(0, math.min(100, durability))
+end
+
+local function getArmorRepairConfig(itemName)
+    local config = armorRepairItems[itemName]
+    if not config then return end
+
+    if type(config) == 'number' then
+        return config, 'durability'
+    end
+
+    if type(config) ~= 'table' then
+        return
+    end
+
+    local amount = tonumber(config.amount or config.value or config.repair or config[1])
+    if not amount or amount <= 0 then
+        return
+    end
+
+    local mode = config.mode == 'armor' and 'armor' or 'durability'
+    return amount, mode
 end
 
 local function extractJobName(entry)
@@ -237,8 +289,32 @@ local function isItemAllowed(itemName, utilitySlot)
 
     if not allowed then return false end
 
+    local itemDefinition = Items(itemName)
+
     for i = 1, #allowed do
-        if allowed[i] == itemName then
+        local entry = allowed[i]
+
+        if entry == '$any' then
+            return true
+        end
+
+        if entry == '$weapon' then
+            if itemDefinition and itemDefinition.weapon then
+                return true
+            end
+        elseif entry == '$nonweapon' then
+            if itemDefinition and not itemDefinition.weapon then
+                return true
+            end
+        elseif entry == '$component' then
+            if itemDefinition and itemDefinition.component then
+                return true
+            end
+        elseif entry == '$container' then
+            if itemDefinition and itemDefinition.container then
+                return true
+            end
+        elseif entry == itemName then
             return true
         end
     end
@@ -249,6 +325,14 @@ end
 local function syncSlots(inventory, slots)
     inventory:syncSlotsWithPlayer(slots, inventory.weight)
     inventory:syncSlotsWithClients(slots, true)
+end
+
+local function logUtilityMove(source, eventName, message, details)
+    if server.loglevel <= 0 then
+        return
+    end
+
+    PureAdminLogger(source, eventName, message, details)
 end
 
 local function validateArmorAccess(inventory, itemName)
@@ -399,6 +483,7 @@ lib.callback.register('ox_inventory:utility:moveTo', function(source, data)
 
     local fromSlot = tonumber(data?.fromSlot)
     local utilitySlot = tonumber(data?.utilitySlot)
+    local fromUtilitySlot = tonumber(data?.fromUtilitySlot)
 
     if not fromSlot or not utilitySlot then
         return false, 'Invalid utility request'
@@ -437,9 +522,206 @@ lib.callback.register('ox_inventory:utility:moveTo', function(source, data)
     end
 
     local reservedSlot = getReservedSlot(utilitySlot)
+    fromUtilitySlot = fromUtilitySlot or getUtilitySlotFromSlot(fromSlot, slotData.metadata)
 
-    if inventory.items[reservedSlot] and reservedSlot ~= fromSlot then
-        return false, 'Utility slot is already occupied'
+    if fromUtilitySlot then
+        if fromUtilitySlot == utilitySlot then
+            return true, { slot = reservedSlot }
+        end
+
+        local targetSlotData = inventory.items[reservedSlot]
+
+        if targetSlotData and targetSlotData.name then
+            if not isItemAllowed(targetSlotData.name, fromUtilitySlot) then
+                return false, 'This item cannot be placed in this slot'
+            end
+
+            if not validateArmorAccess(inventory, targetSlotData.name) then
+                return false, 'You are not authorised to equip this item'
+            end
+        end
+
+        local sourceDefinition = Items(slotData.name)
+        if not sourceDefinition then
+            return false, 'Item data unavailable'
+        end
+
+        local sourceMetadata = setUtilityMetadata(cloneMetadata(slotData.metadata), utilitySlot, slotData.name, inventory.owner, reservedSlot)
+
+        Inventory.SetSlot(inventory, sourceDefinition, -slotData.count, slotData.metadata, fromSlot)
+
+        local replacementItem
+
+        if targetSlotData and targetSlotData.name then
+            local targetDefinition = Items(targetSlotData.name)
+            if not targetDefinition then
+                Inventory.SetSlot(inventory, sourceDefinition, slotData.count, slotData.metadata, fromSlot)
+                return false, 'Item data unavailable'
+            end
+
+            local targetMetadata = setUtilityMetadata(cloneMetadata(targetSlotData.metadata), fromUtilitySlot, targetSlotData.name, inventory.owner, fromSlot)
+            Inventory.SetSlot(inventory, targetDefinition, -targetSlotData.count, targetSlotData.metadata, reservedSlot)
+            replacementItem = Inventory.SetSlot(inventory, targetDefinition, targetSlotData.count, targetMetadata, fromSlot)
+        end
+
+        local newItem = Inventory.SetSlot(inventory, sourceDefinition, slotData.count, sourceMetadata, reservedSlot)
+
+        local updates = {
+            { item = replacementItem or { slot = fromSlot }, inventory = inventory.id },
+            { item = newItem or { slot = reservedSlot }, inventory = inventory.id },
+        }
+
+        syncSlots(inventory, updates)
+        logUtilityMove(source, 'ox_inventory_utility_move_to', ('Moved %s into utility slot %s'):format(slotData.name, utilitySlot), {
+            action = 'utility_move_to',
+            mode = 'swap_utility_slots',
+            inventory = {
+                label = inventory.label,
+                owner = inventory.owner,
+                id = inventory.id,
+                type = inventory.type,
+            },
+            item = {
+                name = slotData.name,
+                count = slotData.count,
+                fromSlot = fromSlot,
+                toSlot = reservedSlot,
+                utilitySlot = utilitySlot,
+            },
+            swappedWith = targetSlotData and {
+                name = targetSlotData.name,
+                count = targetSlotData.count,
+                fromUtilitySlot = fromUtilitySlot,
+                toSlot = fromSlot,
+            } or nil,
+        })
+        return true, { slot = reservedSlot }
+    end
+
+    local itemDefinition = Items(slotData.name)
+
+    if not itemDefinition then
+        return false, 'Item data unavailable'
+    end
+
+    local armorValue = getArmorValue(slotData.name)
+
+    local metadata = cloneMetadata(slotData.metadata)
+    metadata = setUtilityMetadata(metadata, utilitySlot, slotData.name, inventory.owner, reservedSlot)
+
+    if armorValue and metadata.durability == nil then
+        metadata.durability = getInitialArmorDurability(slotData.name)
+    end
+
+    local targetSlotData = inventory.items[reservedSlot]
+
+    if targetSlotData and reservedSlot ~= fromSlot then
+        local canStackIntoUtility = itemDefinition.stack
+            and targetSlotData.name == slotData.name
+            and table.matches(targetSlotData.metadata, metadata)
+
+        if not canStackIntoUtility then
+            local targetDefinition = Items(targetSlotData.name)
+
+            if not targetDefinition then
+                return false, 'Item data unavailable'
+            end
+
+            local targetArmorValue = getArmorValue(targetSlotData.name)
+            local targetBackpackConfig = UtilityConfig.backpackItems and UtilityConfig.backpackItems[targetSlotData.name]
+            local targetMetadata = clearUtilityMetadata(cloneMetadata(targetSlotData.metadata))
+
+            Inventory.SetSlot(inventory, itemDefinition, -slotData.count, slotData.metadata, fromSlot)
+            Inventory.SetSlot(inventory, targetDefinition, -targetSlotData.count, targetSlotData.metadata, reservedSlot)
+
+            local replacementItem = Inventory.SetSlot(inventory, targetDefinition, targetSlotData.count, targetMetadata, fromSlot)
+            local newItem = Inventory.SetSlot(inventory, itemDefinition, slotData.count, metadata, reservedSlot)
+            local newContainer = ensureBackpackInventory(inventory, newItem)
+
+            local updates = {
+                { item = replacementItem or { slot = fromSlot }, inventory = inventory.id },
+                { item = newItem or { slot = reservedSlot }, inventory = inventory.id },
+            }
+
+            if targetBackpackConfig then
+                TriggerClientEvent('ox_inventory:utility:setBackpack', inventory.id, false)
+            end
+
+            syncSlots(inventory, updates)
+
+            if targetArmorValue then
+                TriggerClientEvent('ox_inventory:utility:removeArmor', inventory.id, { slot = reservedSlot })
+                syncQbxArmorMetadata(inventory.id, 0)
+            end
+
+            if targetBackpackConfig then
+                TriggerClientEvent('ox_inventory:utility:removeBackpack', inventory.id, { slot = reservedSlot })
+            end
+
+            if targetSlotData.name == 'parachute' then
+                TriggerClientEvent('ox_inventory:utility:removeParachute', inventory.id, { slot = reservedSlot })
+            end
+
+            if newContainer then
+                TriggerClientEvent('ox_inventory:utility:setBackpack', inventory.id, serialiseInventory(newContainer, 'backpack'))
+            end
+
+            if armorValue and newItem then
+                local durability = tonumber(newItem.metadata and newItem.metadata.durability) or 100
+                if durability < 0 then durability = 0 elseif durability > 100 then durability = 100 end
+                local actualArmor = math.floor(armorValue * (durability / 100))
+
+                TriggerClientEvent('ox_inventory:utility:wearArmor', inventory.id, {
+                    slot = reservedSlot,
+                    utilitySlot = utilitySlot,
+                    maxValue = armorValue,
+                    durability = durability
+                })
+                syncQbxArmorMetadata(inventory.id, actualArmor)
+            end
+
+            if backpackConfig and backpackConfig.component and newItem then
+                TriggerClientEvent('ox_inventory:utility:wearBackpack', inventory.id, {
+                    slot = reservedSlot,
+                    utilitySlot = utilitySlot,
+                    itemName = slotData.name,
+                    drawable = backpackConfig.component.drawable,
+                    texture = backpackConfig.component.texture or 0
+                })
+            end
+
+            if slotData.name == 'parachute' and newItem then
+                TriggerClientEvent('ox_inventory:utility:wearParachute', inventory.id, {
+                    slot = reservedSlot,
+                    utilitySlot = utilitySlot,
+                    type = newItem.metadata and newItem.metadata.type,
+                })
+            end
+
+            logUtilityMove(source, 'ox_inventory_utility_move_to', ('Moved %s into utility slot %s'):format(slotData.name, utilitySlot), {
+                action = 'utility_move_to',
+                mode = 'swap_with_inventory_slot',
+                inventory = {
+                    label = inventory.label,
+                    owner = inventory.owner,
+                    id = inventory.id,
+                    type = inventory.type,
+                },
+                item = {
+                    name = slotData.name,
+                    count = slotData.count,
+                    fromSlot = fromSlot,
+                    toSlot = reservedSlot,
+                    utilitySlot = utilitySlot,
+                },
+                swappedWith = targetSlotData and {
+                    name = targetSlotData.name,
+                    count = targetSlotData.count,
+                    movedToSlot = fromSlot,
+                } or nil,
+            })
+            return true, { slot = reservedSlot }
+        end
     end
 
     local container
@@ -462,19 +744,6 @@ lib.callback.register('ox_inventory:utility:moveTo', function(source, data)
         end
     end
 
-    local itemDefinition = Items(slotData.name)
-
-    if not itemDefinition then
-        return false, 'Item data unavailable'
-    end
-
-    local armorValue = getArmorValue(slotData.name)
-
-    local armorValue = getArmorValue(slotData.name)
-
-    local metadata = cloneMetadata(slotData.metadata)
-    metadata = setUtilityMetadata(metadata, utilitySlot, slotData.name, inventory.owner, reservedSlot)
-
     Inventory.SetSlot(inventory, itemDefinition, -slotData.count, slotData.metadata, fromSlot)
     local newItem = Inventory.SetSlot(inventory, itemDefinition, slotData.count, metadata, reservedSlot)
 
@@ -494,6 +763,7 @@ lib.callback.register('ox_inventory:utility:moveTo', function(source, data)
     if armorValue and newItem then
         local durability = tonumber(newItem.metadata and newItem.metadata.durability) or 100
         if durability < 0 then durability = 0 elseif durability > 100 then durability = 100 end
+        local actualArmor = math.floor(armorValue * (durability / 100))
 
         TriggerClientEvent('ox_inventory:utility:wearArmor', inventory.id, {
             slot = reservedSlot,
@@ -501,6 +771,7 @@ lib.callback.register('ox_inventory:utility:moveTo', function(source, data)
             maxValue = armorValue,
             durability = durability
         })
+        syncQbxArmorMetadata(inventory.id, actualArmor)
     end
 
     local backpackConfig = UtilityConfig.backpackItems and UtilityConfig.backpackItems[slotData.name]
@@ -514,6 +785,31 @@ lib.callback.register('ox_inventory:utility:moveTo', function(source, data)
         })
     end
 
+    if slotData.name == 'parachute' and newItem then
+        TriggerClientEvent('ox_inventory:utility:wearParachute', inventory.id, {
+            slot = reservedSlot,
+            utilitySlot = utilitySlot,
+            type = newItem.metadata and newItem.metadata.type,
+        })
+    end
+
+    logUtilityMove(source, 'ox_inventory_utility_move_to', ('Moved %s into utility slot %s'):format(slotData.name, utilitySlot), {
+        action = 'utility_move_to',
+        mode = 'inventory_to_utility',
+        inventory = {
+            label = inventory.label,
+            owner = inventory.owner,
+            id = inventory.id,
+            type = inventory.type,
+        },
+        item = {
+            name = slotData.name,
+            count = slotData.count,
+            fromSlot = fromSlot,
+            toSlot = reservedSlot,
+            utilitySlot = utilitySlot,
+        },
+    })
     return true, { slot = reservedSlot }
 end)
 
@@ -546,6 +842,7 @@ lib.callback.register('ox_inventory:utility:moveFrom', function(source, data)
         return false, 'Item data unavailable'
     end
 
+    local armorValue = getArmorValue(slotData.name)
     local backpackConfig = UtilityConfig.backpackItems and UtilityConfig.backpackItems[slotData.name]
     local isBackpack = backpackConfig ~= nil
 
@@ -604,7 +901,28 @@ lib.callback.register('ox_inventory:utility:moveFrom', function(source, data)
         syncSlots(inventory, updates)
         if armorValue then
             TriggerClientEvent('ox_inventory:utility:removeArmor', inventory.id, { slot = reservedSlot })
+            syncQbxArmorMetadata(inventory.id, 0)
         end
+        if slotData.name == 'parachute' then
+            TriggerClientEvent('ox_inventory:utility:removeParachute', inventory.id, { slot = reservedSlot })
+        end
+        logUtilityMove(source, 'ox_inventory_utility_move_from', ('Moved %s out of utility slot %s'):format(slotData.name, utilitySlot), {
+            action = 'utility_move_from',
+            mode = 'utility_to_inventory_slot',
+            inventory = {
+                label = inventory.label,
+                owner = inventory.owner,
+                id = inventory.id,
+                type = inventory.type,
+            },
+            item = {
+                name = slotData.name,
+                count = slotData.count,
+                fromSlot = reservedSlot,
+                utilitySlot = utilitySlot,
+                toSlot = toSlot,
+            },
+        })
         return true, { slot = toSlot }
     end
 
@@ -639,12 +957,34 @@ lib.callback.register('ox_inventory:utility:moveFrom', function(source, data)
 
     if armorValue then
         TriggerClientEvent('ox_inventory:utility:removeArmor', inventory.id, { slot = reservedSlot })
+        syncQbxArmorMetadata(inventory.id, 0)
     end
 
     if backpackConfig then
         TriggerClientEvent('ox_inventory:utility:removeBackpack', inventory.id, { slot = reservedSlot })
     end
 
+    if slotData.name == 'parachute' then
+        TriggerClientEvent('ox_inventory:utility:removeParachute', inventory.id, { slot = reservedSlot })
+    end
+
+    logUtilityMove(source, 'ox_inventory_utility_move_from', ('Moved %s out of utility slot %s'):format(slotData.name, utilitySlot), {
+        action = 'utility_move_from',
+        mode = 'utility_to_inventory_auto',
+        inventory = {
+            label = inventory.label,
+            owner = inventory.owner,
+            id = inventory.id,
+            type = inventory.type,
+        },
+        item = {
+            name = slotData.name,
+            count = slotData.count,
+            fromSlot = reservedSlot,
+            utilitySlot = utilitySlot,
+        },
+        result = addResult,
+    })
     return true, addResult
 end)
 
@@ -733,6 +1073,7 @@ RegisterNetEvent('ox_inventory:utility:updateArmorDurability', function(slot, lo
     if newDurability <= 0 then
         TriggerClientEvent('ox_inventory:utility:removeArmor', src, { slot = slot, broken = true })
         TriggerClientEvent('ox_lib:notify', src, { type = 'error', description = locale('armor_broken') })
+        syncQbxArmorMetadata(src, 0)
     else
         local actualArmor = math.floor(armorValue * (newDurability / 100))
         TriggerClientEvent('ox_inventory:utility:updateArmor', src, {
@@ -741,6 +1082,7 @@ RegisterNetEvent('ox_inventory:utility:updateArmorDurability', function(slot, lo
             maxValue = armorValue,
             durability = newDurability
         })
+        syncQbxArmorMetadata(src, actualArmor)
     end
 end)
 
@@ -751,7 +1093,7 @@ RegisterNetEvent('ox_inventory:utility:applyArmorPlate', function(data)
 
     if not itemName then return end
 
-    local repairAmount = armorRepairItems[itemName]
+    local repairAmount, repairMode = getArmorRepairConfig(itemName)
     if not repairAmount or repairAmount <= 0 then
         return
     end
@@ -792,12 +1134,25 @@ RegisterNetEvent('ox_inventory:utility:applyArmorPlate', function(data)
         return
     end
 
-    local newDurability = math.min(100, currentDurability + repairAmount)
+    local armorValue = getArmorValue(equippedArmor.name)
+    if not armorValue or armorValue <= 0 then
+        return
+    end
+
+    local newDurability
+
+    if repairMode == 'armor' then
+        local currentArmorValue = math.floor(armorValue * (currentDurability / 100))
+        local newArmorValue = math.min(armorValue, currentArmorValue + repairAmount)
+        newDurability = math.min(100, (newArmorValue / armorValue) * 100)
+    else
+        newDurability = math.min(100, currentDurability + repairAmount)
+    end
+
     metadata.durability = newDurability
 
     Inventory.SetMetadata(inventory, targetSlot, metadata)
 
-    local armorValue = getArmorValue(equippedArmor.name)
     local actualArmor = math.floor(armorValue * (newDurability / 100))
 
     TriggerClientEvent('ox_inventory:utility:updateArmor', src, {
@@ -806,8 +1161,32 @@ RegisterNetEvent('ox_inventory:utility:applyArmorPlate', function(data)
         maxValue = armorValue,
         durability = newDurability
     })
+    syncQbxArmorMetadata(src, actualArmor)
 
     TriggerClientEvent('ox_lib:notify', src, { type = 'success', description = locale('armor_repaired') })
+end)
+
+RegisterNetEvent('ox_inventory:utility:consumeParachute', function(slot)
+    local src = source
+    local reservedSlot = tonumber(slot)
+
+    if not reservedSlot then return end
+
+    local inventory = Inventory(src)
+    if not inventory then return end
+
+    local slotData = inventory.items[reservedSlot]
+    if not slotData or slotData.name ~= 'parachute' then return end
+
+    if not Inventory.RemoveItem(inventory, 'parachute', 1, nil, reservedSlot) then
+        return
+    end
+
+    local updates = {
+        { item = inventory.items[reservedSlot] or { slot = reservedSlot }, inventory = inventory.id },
+    }
+
+    syncSlots(inventory, updates)
 end)
 
 return Utility

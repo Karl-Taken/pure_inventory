@@ -84,6 +84,7 @@ local function Item(name, cb)
 end
 
 local ox_inventory = exports[shared.resource]
+local UtilityConfig = lib.load('data.utility') or {}
 -----------------------------------------------------------------------------------------------
 -- Clientside item use functions
 -----------------------------------------------------------------------------------------------
@@ -100,6 +101,10 @@ Item('bandage', function(data, slot)
 end)
 
 Item('armour', function(data, slot)
+	if UtilityConfig.enabled and UtilityConfig.armorItems and UtilityConfig.armorItems.armour then
+		return lib.notify({ type = 'inform', description = locale('armor_move_to_slot') })
+	end
+
 	if GetPedArmour(cache.ped) < 100 then
 		ox_inventory:useItem(data, function(data)
 			if data then
@@ -107,6 +112,12 @@ Item('armour', function(data, slot)
 				SetPedArmour(cache.ped, 100)
 			end
 		end)
+	end
+end)
+
+Item('heavyarmour', function()
+	if UtilityConfig.enabled and UtilityConfig.armorItems and UtilityConfig.armorItems.heavyarmour then
+		return lib.notify({ type = 'inform', description = locale('armor_move_to_slot') })
 	end
 end)
 

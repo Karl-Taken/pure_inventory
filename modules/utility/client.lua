@@ -25,6 +25,10 @@ lib.onCache('ped', function(ped)
     if backpackComponentsEnabled and Utility.currentBackpack and Utility.currentBackpack.drawable then
         SetPedComponentVariation(playerPed, 5, Utility.currentBackpack.drawable, Utility.currentBackpack.texture, 0)
     end
+
+    if Utility.currentParachute and Utility.currentParachute.slot then
+        equipParachute(Utility.currentParachute.slot, Utility.currentParachute.utilitySlot, Utility.currentParachute.tint)
+    end
 end)
 
 local currentArmor = {
@@ -46,6 +50,15 @@ local currentBackpack = {
 }
 
 Utility.currentBackpack = currentBackpack
+
+local currentParachute = {
+    slot = nil,
+    utilitySlot = nil,
+    tint = -1,
+    consumed = false,
+}
+
+Utility.currentParachute = currentParachute
 
 local lastArmorValue = 0
 local isRepairing = false
@@ -78,6 +91,78 @@ local function removeBackpackComponent()
     if not ped then return end
 
     SetPedComponentVariation(ped, 5, 0, 0, 0)
+end
+
+local function deleteEntitySafe(entity)
+    if entity and DoesEntityExist(entity) then
+        SetEntityAsMissionEntity(entity, false, true)
+        DeleteEntity(entity)
+    end
+end
+
+local function cleanupParachuteBags()
+    local ped = playerPed or cache.ped
+    if not ped then return end
+
+    local parachuteBagModel = 1269906701
+    local objects = GetGamePool('CObject')
+
+    for i = 1, #objects do
+        local object = objects[i]
+
+        if DoesEntityExist(object) and GetEntityModel(object) == parachuteBagModel then
+            local attachedTo = GetEntityAttachedTo(object)
+
+            if attachedTo == ped or #(GetEntityCoords(object) - GetEntityCoords(ped)) < 2.0 then
+                deleteEntitySafe(object)
+            end
+        end
+    end
+end
+
+local function equipParachute(slot, utilitySlot, tint)
+    local ped = playerPed or cache.ped
+    if not ped then return end
+
+    local parachuteTint = tonumber(tint) or -1
+    local chute = `GADGET_PARACHUTE`
+
+    cleanupParachuteBags()
+
+    if client.parachute then
+        deleteEntitySafe(client.parachute[1])
+        client.parachute = false
+    end
+
+    SetPlayerParachuteTintIndex(PlayerId(), parachuteTint >= 0 and parachuteTint or -1)
+    GiveWeaponToPed(ped, chute, 0, true, false)
+    SetPedGadget(ped, chute, true)
+    lib.requestModel(1269906701)
+
+    client.parachute = { CreateParachuteBagObject(ped, true, true), parachuteTint }
+    currentParachute.slot = slot
+    currentParachute.utilitySlot = utilitySlot
+    currentParachute.tint = parachuteTint
+    currentParachute.consumed = false
+end
+
+local function clearParachute(removeGadget)
+    local ped = playerPed or cache.ped
+    if removeGadget ~= false and ped then
+        RemoveWeaponFromPed(ped, `GADGET_PARACHUTE`)
+    end
+
+    cleanupParachuteBags()
+
+    if client.parachute then
+        deleteEntitySafe(client.parachute[1])
+        client.parachute = false
+    end
+
+    currentParachute.slot = nil
+    currentParachute.utilitySlot = nil
+    currentParachute.tint = -1
+    currentParachute.consumed = false
 end
 
 local function clampDurability(value)
@@ -222,6 +307,9 @@ function Utility.collect(items)
             icons = UtilityConfig.icons or {},
             iconSizes = UtilityConfig.iconSizes or {},
             items = UtilityConfig.items or {},
+            hotbarSlots = UtilityConfig.hotbarSlots or {},
+            hotkeys = UtilityConfig.hotkeys or {},
+            layout = UtilityConfig.layout or {},
         },
     }
 
@@ -249,15 +337,18 @@ end
 function Utility.refreshArmorFromInventory(items)
     if not Utility.enabled then return false end
 
-    
     local armor = findEquippedArmor(items)
 
     if armor then
+        -- Avoid reapplying stale inventory armor values over live damage while the same armor piece is already equipped.
+        if currentArmor.slot and currentArmor.slot == armor.slot and currentArmor.utilitySlot == armor.utilitySlot then
+            return true
+        end
+
         applyArmorState(armor.slot, armor.utilitySlot, armor.maxValue, armor.durability, armor.value)
         return true
     end
 
-    
     if currentArmor.slot then
         resetArmorState()
     end
@@ -318,6 +409,58 @@ function Utility.refreshBackpackFromInventory(items)
     end
 
     return false
+end
+
+function Utility.refreshParachuteFromInventory(items)
+    if not Utility.enabled then return false end
+
+    if not items then
+        if currentParachute.slot then
+            clearParachute()
+        end
+        return false
+    end
+
+    local slots = UtilityConfig.slots or 0
+    local offset = Utility.slotOffset
+
+    for i = 1, slots do
+        local reservedSlot = offset > 0 and offset + i or i
+        local slotData = items[reservedSlot]
+
+        if slotData and slotData.name == 'parachute' then
+            local utilitySlot = getUtilitySlot(slotData.metadata, reservedSlot)
+
+            if utilitySlot and utilitySlot == i then
+                local tint = slotData.metadata and slotData.metadata.type
+
+                if currentParachute.slot == reservedSlot and currentParachute.utilitySlot == utilitySlot and currentParachute.tint == (tonumber(tint) or -1) and client.parachute then
+                    return true
+                end
+
+                equipParachute(reservedSlot, utilitySlot, slotData.metadata and slotData.metadata.type)
+                return true
+            end
+        end
+    end
+
+    if currentParachute.slot then
+        clearParachute()
+    end
+
+    return false
+end
+
+function Utility.handleParachuteDeployment()
+    if not currentParachute.slot or currentParachute.consumed then
+        return false
+    end
+
+    local consumedSlot = currentParachute.slot
+    currentParachute.consumed = true
+    clearParachute(false)
+    TriggerServerEvent('ox_inventory:utility:consumeParachute', consumedSlot)
+    return true
 end
 
 function Utility.getEquippedArmor()
@@ -458,6 +601,20 @@ RegisterNetEvent('ox_inventory:utility:removeBackpack', function(data)
 
     if not data or not data.slot or not currentBackpack.slot or data.slot == currentBackpack.slot then
         Utility.clearBackpack()
+    end
+end)
+
+RegisterNetEvent('ox_inventory:utility:wearParachute', function(data)
+    if not Utility.enabled or not data then return end
+
+    equipParachute(tonumber(data.slot) or data.slot, tonumber(data.utilitySlot) or data.utilitySlot, data.type)
+end)
+
+RegisterNetEvent('ox_inventory:utility:removeParachute', function(data)
+    if not Utility.enabled then return end
+
+    if not data or not data.slot or not currentParachute.slot or data.slot == currentParachute.slot then
+        clearParachute()
     end
 end)
 

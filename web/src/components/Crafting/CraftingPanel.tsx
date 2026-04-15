@@ -14,6 +14,7 @@ import { useAppDispatch, useAppSelector } from '../../store';
 import { craftItem } from '../../thunks/craftItem';
 import { cancelCraft } from '../../thunks/cancelCraft';
 import useNuiEvent from '../../hooks/useNuiEvent';
+import FallbackItemImage from '../utils/FallbackItemImage';
 
 type CraftingRecipe = SlotWithItem & {
   xp?: {
@@ -562,7 +563,7 @@ const CraftingPanel: React.FC<CraftingPanelProps> = ({ inventory }) => {
             {selectedRecipe ? (
               <>
                 <div className="crafting-preview-thumb">
-                  <img src={getItemUrl(selectedRecipe)} alt={selectedLabel || 'recipe'} />
+                  <FallbackItemImage src={getItemUrl(selectedRecipe)} alt={selectedLabel || 'recipe'} />
                 </div>
                 <div className="crafting-preview-info">
                   <h3>{selectedLabel}</h3>

@@ -44,6 +44,14 @@ export const normaliseInventory = (
     delete normalised.otherBackpack;
   }
 
+  if (inventory.weaponMagazine) {
+    const weaponMagazine = normaliseInventory(inventory.weaponMagazine, curTime);
+    if (weaponMagazine) normalised.weaponMagazine = weaponMagazine;
+    else delete normalised.weaponMagazine;
+  } else {
+    delete normalised.weaponMagazine;
+  }
+
   if (inventory.storage) {
     const storage = normaliseInventory(inventory.storage, curTime);
     if (storage) normalised.storage = storage;

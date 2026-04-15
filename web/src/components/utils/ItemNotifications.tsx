@@ -8,6 +8,7 @@ import { getItemUrl } from '../../helpers';
 import { SlotWithItem } from '../../typings';
 import { Items } from '../../store/items';
 import Fade from './transitions/Fade';
+import FallbackItemImage from './FallbackItemImage';
 
 interface ItemNotificationPayload {
   item: SlotWithItem;
@@ -47,7 +48,7 @@ const ItemNotification = React.forwardRef(
           <p>{props.payload.action}</p>
         </div>
         <div className="item-slot-img">
-          <img src={getItemUrl(slotItem)} alt={label} />
+          <FallbackItemImage src={getItemUrl(slotItem)} alt={label} />
         </div>
         <div className="item-slot-amount">
           <p>x{count}</p>

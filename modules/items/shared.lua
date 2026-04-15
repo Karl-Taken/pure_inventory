@@ -6,6 +6,7 @@ end
 
 local ItemList = {}
 local isServer = IsDuplicityVersion()
+local Magazines = lib.load('data.magazines') or {}
 
 local function setImagePath(path)
     if path then
@@ -86,6 +87,7 @@ for type, data in pairs(lib.load('data.weapons') or {}) do
 			v.stack = v.throwable and true or false
 			v.durability = v.durability or 0.05
 			v.weapon = true
+
 		else
 			v.stack = true
 		end
@@ -113,6 +115,37 @@ for k, v in pairs(lib.load('data.items') or {}) do
     if not success then
         warn(('An error occurred while creating item "%s" callback!\n^1SCRIPT ERROR: %s^0'):format(k, response))
     end
+end
+
+for ammoType, data in pairs(Magazines) do
+    local ammoItem = ItemList[ammoType]
+    local magazine = {
+        name = data.name,
+        label = data.label,
+        weight = data.weight or 100,
+        stack = false,
+        close = true,
+        consume = 0,
+        magazine = true,
+        allowArmed = true,
+        ammoType = ammoType,
+        capacity = data.capacity,
+        description = data.description or ('Stores %s rounds for supported weapons.'):format(ammoItem?.label or ammoType),
+    }
+
+    if isServer then
+        magazine.client = nil
+    else
+        magazine.count = 0
+        magazine.server = nil
+        magazine.client = {}
+
+        if data.image then
+            magazine.client.image = setImagePath(data.image)
+        end
+    end
+
+    ItemList[magazine.name] = magazine
 end
 
 ItemList.cash = ItemList.money

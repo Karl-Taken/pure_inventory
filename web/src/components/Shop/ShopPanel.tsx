@@ -10,6 +10,7 @@ import { isEqual } from 'lodash';
 import { useDrag, useDrop } from 'react-dnd';
 import type { DragSource } from '../../typings';
 import shopBadgeIcon from '../../assets/svg/others.svg';
+import FallbackItemImage from '../utils/FallbackItemImage';
 
 type PaymentMethod = 'cash' | 'bank';
 
@@ -177,11 +178,11 @@ const ShopItemCard: React.FC<ShopItemCardProps> = ({
 
       <div className="item-slot-content">
         <div className="item-slot-img">
-          {entry.image ? <img src={entry.image} alt={entry.label} /> : null}
+          <FallbackItemImage src={entry.image} alt={entry.label} />
         </div>
+        <div className="item-weight">{(entry.weight / 1000).toFixed(2)}kg</div>
         <div className="item-slot-footer">
           <div className="item-name">{entry.label}</div>
-          <div className="item-weight">{(entry.weight / 1000).toFixed(2)}kg</div>
         </div>
       </div>
     </button>
@@ -660,6 +661,39 @@ const ShopPanel: React.FC = () => {
         ))}
       </div>
 
+      <div className="shop-selection-bar">
+        <div className="shop-selection-copy">
+          <span className="shop-selection-label">{t('shop_selection', 'Selection')}</span>
+          <strong>{selectedEntry?.label || t('shop_selection_empty', 'Choose an item')}</strong>
+          <small>
+            {selectedEntry
+              ? `${formatPrice(selectedEntry.price, selectedEntry.currency)} - ${(selectedEntry.weight / 1000).toFixed(
+                  2
+                )}kg`
+              : t('shop_selection_hint', 'Double-click to buy or add it to the cart.')}
+          </small>
+        </div>
+
+        <div className="shop-selection-actions">
+          <button
+            type="button"
+            className="shop-action-button ghost"
+            onClick={handleAddSelectedToBasket}
+            disabled={!selectedEntry || isProcessing}
+          >
+            {t('shop_add_to_cart', 'Add to Cart')}
+          </button>
+          <button
+            type="button"
+            className="shop-action-button primary"
+            onClick={handleBuySelected}
+            disabled={!selectedEntry || isProcessing}
+          >
+            {t('shop_buy_now', 'Buy Now')}
+          </button>
+        </div>
+      </div>
+
       <div className="shop-grid">
         {filteredShopItems.map((entry) => {
           const isSelected = selectedSlot === entry.slot;
@@ -694,7 +728,7 @@ const ShopPanel: React.FC = () => {
         {basket.length === 0 ? (
           <div className="basket-empty">
             <i className="fas fa-hand-pointer" />
-            <p>{t('shop_cart_help', 'Select items and use Add to Cart to build your order.')}</p>
+            <p>{t('shop_cart_help', 'Drag items here or use Add to Cart to build your order.')}</p>
           </div>
         ) : (
           <div className="cart-list basket-list">
@@ -787,5 +821,6 @@ const ShopPanel: React.FC = () => {
 };
 
 export default ShopPanel;
+
 
 

@@ -7,6 +7,7 @@ import { useAppSelector } from '../../store';
 import ClockIcon from '../utils/icons/ClockIcon';
 import { getItemUrl } from '../../helpers';
 import Divider from '../utils/Divider';
+import FallbackItemImage from '../utils/FallbackItemImage';
 
 const SlotTooltip: React.ForwardRefRenderFunction<
   HTMLDivElement,
@@ -18,8 +19,26 @@ const SlotTooltip: React.ForwardRefRenderFunction<
     if (!item.ingredients) return null;
     return Object.entries(item.ingredients).sort((a, b) => a[1] - b[1]);
   }, [item]);
-  const description = item.metadata?.description || itemData?.description;
+  const description = typeof (item.metadata?.description || itemData?.description) === 'string'
+    ? (item.metadata?.description || itemData?.description).trim()
+    : item.metadata?.description || itemData?.description;
+  const hasDescription = Boolean(description);
   const ammoName = itemData?.ammoName && Items[itemData?.ammoName]?.label;
+  const loadedMagazine = item.metadata?.loadedMagazine;
+  const loadedMagazineLabel =
+    loadedMagazine?.name && Items[loadedMagazine.name]?.label
+      ? Items[loadedMagazine.name]?.label
+      : loadedMagazine?.name
+      ? loadedMagazine.name
+      : 'Magazine';
+  const loadedMagazineAmmo = Number(loadedMagazine?.ammo ?? loadedMagazine?.rounds ?? 0);
+  const loadedMagazineCapacity = Number(loadedMagazine?.capacity ?? 0);
+  const containsText =
+    itemData?.weapon && itemData?.ammoName
+      ? loadedMagazine
+        ? `${loadedMagazineLabel} (${loadedMagazineAmmo}/${loadedMagazineCapacity})`
+        : 'Empty'
+      : null;
 
   return (
     <>
@@ -33,7 +52,7 @@ const SlotTooltip: React.ForwardRefRenderFunction<
       ) : (
         <div style={{ ...style }} className="tooltip-wrapper" ref={ref}>
           <div className="tooltip-header-wrapper">
-            <p>{item.metadata?.label || itemData.label || item.name}</p>
+            <p className="tooltip-title">{item.metadata?.label || itemData.label || item.name}</p>
             {inventoryType === 'crafting' ? (
               <div className="tooltip-crafting-duration">
                 <ClockIcon />
@@ -43,8 +62,8 @@ const SlotTooltip: React.ForwardRefRenderFunction<
               <p>{item.metadata?.type}</p>
             )}
           </div>
-          <Divider />
-          {description && (
+          {hasDescription && <Divider />}
+          {hasDescription && (
             <div className="tooltip-description">
               <ReactMarkdown className="tooltip-markdown">{description}</ReactMarkdown>
             </div>
@@ -56,11 +75,15 @@ const SlotTooltip: React.ForwardRefRenderFunction<
                   {Locale.ui_durability}: {Math.trunc(item.durability)}
                 </p>
               )}
-              {item.metadata?.ammo !== undefined && (
+              {containsText ? (
+                <p>
+                  Contains: {containsText}
+                </p>
+              ) : item.metadata?.ammo !== undefined ? (
                 <p>
                   {Locale.ui_ammo}: {item.metadata.ammo}
                 </p>
-              )}
+              ) : null}
               {ammoName && (
                 <p>
                   {Locale.ammo_type}: {ammoName}
@@ -101,7 +124,7 @@ const SlotTooltip: React.ForwardRefRenderFunction<
                   const [item, count] = [ingredient[0], ingredient[1]];
                   return (
                     <div className="tooltip-ingredient" key={`ingredient-${item}`}>
-                      <img src={item ? getItemUrl(item) : 'none'} alt="item-image" />
+                      <FallbackItemImage src={item ? getItemUrl(item) : 'none'} alt="item-image" />
                       <p>
                         {count >= 1
                           ? `${count}x ${Items[item]?.label || item}`
